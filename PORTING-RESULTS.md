@@ -2,7 +2,7 @@
 
 - 日期：2026-11-18
 - 仓库：`/home/zz8011/Projects/flow-py`（同步至 `~/tools/flow-py-patched` 与 `~/workspace/flow-py-trial/src-patched/`）
-- 测试项目：`d22a3a7b-7006-48a2-9ee3-fcb5b9974e21`（账号 `zeedzh@gmail.com` / ULTRA）
+- 测试项目：`d22a3a7b-7006-48a2-9ee3-fcb5b9974e21`（ULTRA 订阅档位）
 - 积分总账：起始 **24,860** → 结束 **24,816**，10 项端到端 CLI 验收合计消耗 **44 积分**（远低于 200/300 上限），每笔确认卡报价、官方价目表（`HTrJv` tier=3）与实际扣费 100% 分毫不差。
 
 ---
