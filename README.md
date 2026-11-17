@@ -41,6 +41,7 @@
 | 区间重绘（Replace） | `flow music replace` | `replace_section()` | 指定 `[start, end]` 时间窗局部重做过渡段或副歌 |
 | 精准裁剪与淡入淡出 | `flow music trim` | `trim_song()` | 精确裁切时间区间并添加平滑淡入/淡出（**0 积分免费**） |
 | 四轨分轨提取（Stems） | `flow music stems` | `split_stems()` | 分离提取 `vocals`（人声）、`drums`（鼓）、`bass`（贝斯）、`other`（伴奏） |
+| 视频配乐 | `flow music score` | `score_video()` | Producer 看懂视频后作曲，自动按视频时长裁剪+淡出，`--mux` 直接合成带配乐的 mp4 |
 | 多格式免费无限下载 | `flow music download` | `download_song()` | 支持无损 **`wav`**（48kHz PCM）、带封面标签 **`mp3`** 与 **`m4a`**（**0 积分免费**） |
 
 ---
@@ -141,7 +142,10 @@ flow music cover <clip_id> -p "改编成慵懒的 Bossa Nova 爵士吉他与萨�
 flow music extend <clip_id> -s 20 -p "温暖的口琴与木吉他尾奏渐弱" -o ./music
 flow music replace <clip_id> --start 30 --end 60 -p "加入清脆的钢琴独奏间奏" -o ./music
 
-# 8. 将任意历史歌曲导出为无损 WAV / MP3 / M4A（0 积分）
+# 8. 给视频配乐（上传视频→生成 2 首→裁到视频时长→可合成进视频；约 10 积分）
+flow music score ./video.mp4 -p "轻松舒缓的钢琴" -o ./music --mux
+
+# 9. 将任意历史歌曲导出为无损 WAV / MP3 / M4A（0 积分）
 flow music download <clip_id> -f wav -o ./music
 ```
 
@@ -220,6 +224,7 @@ flow music extend <CLIP_ID>       续写延长歌曲（-s 延长秒数 / --from-
 flow music replace <CLIP_ID>      区间局部重绘（--start 起始秒 --end 结束秒 -p 指令）
 flow music trim <CLIP_ID>         精准时间裁剪与淡入淡出（--start / --end / --fade-in / --fade-out，0 积分）
 flow music stems <CLIP_ID>        分离人声/鼓/贝斯/伴奏四轨并批量导出
+flow music score <VIDEO>          为视频配乐（-p 风格 / --mux 合成进视频，约 5 积分/首）
 flow music download <CLIP_ID>     导出 mp3 / wav（无损） / m4a 音频（0 积分）
 ```
 

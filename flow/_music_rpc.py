@@ -305,7 +305,22 @@ class FlowMusicRPC:
 
     # ── SSE job streaming ──────────────────────────────────────────────
 
-    async def stream_job(
+    async def stream_job(self, job_id: str, **kw: Any) -> dict[str, Any]:
+        """SSE consume with reconnect; the server sometimes drops the stream mid-job."""
+        last: Optional[Exception] = None
+        for _ in range(3):
+            try:
+                return await self._stream_job_once(job_id, **kw)
+            except (aiohttp.ClientPayloadError, aiohttp.ServerDisconnectedError) as e:
+                last = e
+                await asyncio.sleep(2.0)
+        # 重放仍断流：任务在服务端多半已完成，从对话记录里捞结果
+        raise GenerationError(
+            f"FlowMusic stream {job_id} kept dropping ({last}); the job may still have "
+            "finished server-side — check `flow music songs` / `flow music sessions`."
+        )
+
+    async def _stream_job_once(
         self,
         job_id: str,
         *,

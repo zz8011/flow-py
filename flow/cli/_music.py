@@ -275,6 +275,44 @@ def music_generate(
     _run(_go())
 
 
+@music_cli.command("score")
+@click.argument("video", type=click.Path(exists=True, dir_okay=False))
+@click.option("--prompt", "-p", default="", help="Style hint, e.g. '轻松的原声吉他'")
+@click.option("--model", "-m", default="Lyria 3.5", show_default=True)
+@click.option("--format", "-f", "audio_format", type=click.Choice(["mp3", "wav", "m4a"]), default="mp3", show_default=True)
+@click.option("--output", "-o", default=".", show_default=True, help="Output directory")
+@click.option("--mux", is_flag=True, help="Also mix the first score into the video (needs ffmpeg)")
+@click.option("--headless/--headed", default=True, show_default=True)
+@click.option("--cdp", is_flag=True)
+def music_score(video, prompt, model, audio_format, output, mux, headless, cdp):
+    """Generate a soundtrack for VIDEO (Producer watches it; ~5 credits per song, trim free)."""
+    async def _go():
+        client = await _make_music_client(headless=headless, cdp=cdp)
+        try:
+            clips = await client.score_video(video, prompt, model=model, on_progress=_progress_cb)
+            saved = []
+            for c in clips:
+                p = await client.download_song(c, output, audio_format=audio_format)
+                click.echo(f"🎶 {c.id}  [{c.duration_s:.1f}s]  {c.title}\n   💾 {p}")
+                saved.append(p)
+            if mux:
+                import subprocess
+                dst = Path(output) / f"{Path(video).stem}_scored.mp4"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", video, "-i", str(saved[0]),
+                     "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", str(dst)],
+                    check=True,
+                )
+                click.echo(f"🎬 {dst}")
+        except (FlowError, GenerationError, GenerationTimeout) as e:
+            click.echo(f"\n❌ {e}", err=True)
+            sys.exit(1)
+        finally:
+            await client.close()
+
+    _run(_go())
+
+
 @music_cli.command("chat")
 @click.argument("prompt")
 @click.option("--session", "-s", default=None, help="Existing conversation ID to continue")

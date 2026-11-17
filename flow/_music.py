@@ -112,6 +112,19 @@ class ProducerTurn:
     title: Optional[str] = None
 
 
+async def _probe_duration(path: str | Path) -> float:
+    proc = await asyncio.create_subprocess_exec(
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=nw=1:nk=1", str(path),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    out, err = await proc.communicate()
+    try:
+        return float(out.decode().strip())
+    except ValueError:
+        raise FlowError(f"ffprobe could not read the video duration: {err.decode()[:200]}")
+
+
 def _extract_clip_ids_from_returns(tool_returns: list[dict[str, Any]]) -> list[str]:
     ids: list[str] = []
     for tr in tool_returns:
@@ -351,6 +364,7 @@ class FlowMusicClient:
         *,
         conversation_id: Optional[str] = None,
         audio_path: Optional[str | Path] = None,
+        video_path: Optional[str | Path] = None,
         model: str = "Lyria 3.5",
         wait_clips: bool = True,
         on_progress: Optional[Callable[[str], None]] = None,
@@ -363,6 +377,14 @@ class FlowMusicClient:
                 upload_parts.append(
                     {"kind": "audio-url", "url": up["url"], "media_type": "audio/mpeg"}
                 )
+
+        if video_path:
+            v = await self._rpc.upload_multipart("/video/upload", {}, "video", video_path)
+            if not v.get("video_url"):
+                raise GenerationError(f"Video upload returned no video_url: {v}")
+            upload_parts.append(
+                {"kind": "video-url", "url": v["video_url"], "media_type": "video/mp4"}
+            )
 
         res = await self._rpc.send_chat(
             prompt,
@@ -389,6 +411,31 @@ class FlowMusicClient:
             suggestions=res.get("suggestions") or [],
             title=res.get("title"),
         )
+
+    async def score_video(
+        self,
+        video_path: str | Path,
+        style: str = "",
+        *,
+        model: str = "Lyria 3.5",
+        fade_out_s: float = 1.5,
+        on_progress: Optional[Callable[[str], None]] = None,
+    ) -> list[SongClip]:
+        """Have Producer watch a video and compose matching music, trimmed to the video length (≈5 credits/song)."""
+        dur = await _probe_duration(video_path)
+        prompt = (
+            "请先看这段视频，然后根据画面的内容、情绪和节奏，为它生成一首纯音乐配乐"
+            f"（视频时长约 {dur:.0f} 秒）。{style}"
+        )
+        turn = await self.chat(prompt, video_path=video_path, model=model, on_progress=on_progress)
+        out: list[SongClip] = []
+        for c in turn.clips:
+            if c.duration_s > dur + 0.5:  # trim 免费
+                c = await self.trim_song(c.id, 0.0, dur, fade_out_s=min(fade_out_s, dur / 2))
+            out.append(c)
+        if not out:
+            raise GenerationError(f"Producer produced no song for the video: {turn.text[:200]}")
+        return out
 
     # ── Editing, Stems & Post-processing ───────────────────────────────
 
