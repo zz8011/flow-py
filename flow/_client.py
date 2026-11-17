@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -40,7 +41,14 @@ from ._ui_interceptor import UIInterceptor
 
 log = logging.getLogger(__name__)
 
-# ── Camera motion constants ────────────────────────────────────────────────────
+
+def _safe_filename(text: str, max_len: int = 60) -> str:
+    """Convert prompt text into a safe lowercase filename slug."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+    return slug[:max_len].rstrip("_") or "output"
+
+
+# ── Camera motion / position mappings ─────────────────────────────────────────
 CAMERA_MOTIONS = {
     "dolly_in":          "Dolly in",
     "dolly-in":          "Dolly in",
@@ -69,6 +77,101 @@ CAMERA_POSITIONS = {
     "closer":  "Closer",
     "further": "Further",
 }
+
+_CAMERA_MOTION_CN = {
+    "Dolly in":          "镜头缓慢向前推近（Dolly in）",
+    "Dolly out":         "镜头缓慢向后拉远（Dolly out）",
+    "Orbit left":        "镜头向左环绕移动（Orbit left）",
+    "Orbit right":       "镜头向右环绕移动（Orbit right）",
+    "Orbit up":          "镜头向上环绕移动（Orbit up）",
+    "Orbit low":         "镜头向下低角度环绕（Orbit low）",
+    "Dolly in zoom out": "镜头向前推进同时变焦拉远（Dolly in zoom out）",
+    "Dolly out zoom in": "镜头向后拉远同时变焦推近（Dolly out zoom in）",
+}
+
+_CAMERA_POS_CN = {
+    "Center":  "居中机位（Center）",
+    "Left":    "左侧机位（Left）",
+    "Right":   "右侧机位（Right）",
+    "High":    "高机位俯拍（High）",
+    "Low":     "低机位仰拍（Low）",
+    "Closer":  "近景拉近机位（Closer）",
+    "Further": "远景拉远机位（Further）",
+}
+
+_VIDEO_MODEL_ALIASES = {
+    "veo 3.1 - fast":    "Veo 3.1 - Fast",
+    "veo_3_1_t2v_fast":  "Veo 3.1 - Fast",
+    "veo-fast":          "Veo 3.1 - Fast",
+    "fast":              "Veo 3.1 - Fast",
+    "veo 3.1 - lite":    "Veo 3.1 - Lite",
+    "veo_3_1_t2v_lite":  "Veo 3.1 - Lite",
+    "veo-lite":          "Veo 3.1 - Lite",
+    "lite":              "Veo 3.1 - Lite",
+    "veo 3.1 - quality": "Veo 3.1 - Quality",
+    "veo_3_1_t2v":       "Veo 3.1 - Quality",
+    "quality":           "Veo 3.1 - Quality",
+    "omni 1.2 flash":    "Omni 1.2 Flash",
+    "omni-1.2":          "Omni 1.2 Flash",
+    "omni":              "Omni 1.2 Flash",
+    "macaron":           "Omni 1.2 Flash",
+    "omni 1.1 flash":    "Omni 1.1 Flash",
+    "omni-1.1":          "Omni 1.1 Flash",
+    "abra":              "Omni 1.1 Flash",
+}
+
+_ASPECT_CN = {
+    "landscape": "16:9 横屏",
+    "16:9":      "16:9 横屏",
+    "portrait":  "9:16 竖屏",
+    "9:16":      "9:16 竖屏",
+    "square":    "1:1 方形",
+    "1:1":       "1:1 方形",
+}
+
+
+def _make_cost_verifier(
+    cfg: dict,
+    *,
+    expected_duration_s: Optional[int | set[int]] = None,
+    default_family: Optional[str] = None,
+):
+    """Build a strict confirmation-card price verifier against HTrJv config."""
+    def verify(parsed: dict) -> bool:
+        cost = parsed.get("cost")
+        card_dur = parsed.get("duration_s")
+        if cost is None or cost <= 0:
+            return False
+        raw = parsed.get("raw", "")
+        models = cfg.get("videoModels", [])
+        family = [
+            m for m in models
+            if m.get("displayName") and m["displayName"] in raw
+        ]
+        if not family and default_family:
+            family = [
+                m for m in models
+                if m.get("displayName") == default_family
+            ]
+        if not family:
+            return False
+        if card_dur is not None:
+            return any(
+                m.get("durationS") == card_dur and m.get("creditCost") == cost
+                for m in family
+            )
+        if isinstance(expected_duration_s, set) and expected_duration_s:
+            return any(
+                m.get("durationS") in expected_duration_s and m.get("creditCost") == cost
+                for m in family
+            )
+        if isinstance(expected_duration_s, int):
+            return any(
+                m.get("durationS") == expected_duration_s and m.get("creditCost") == cost
+                for m in family
+            )
+        return any(m.get("creditCost") == cost for m in family)
+    return verify
 
 
 class FlowClient:
@@ -161,35 +264,19 @@ class FlowClient:
         aspect: str = "landscape",
         count: int = 1,
         start_image: Optional[str] = None,
+        reference_images: Optional[list[str]] = None,
         workflow_id: Optional[str] = None,
         timeout_s: int = 120,
     ) -> list[VideoJob]:
         """
-        Generate video(s) via the flow.google.com creation agent.
+        Generate video(s) via the flow.google.com creation agent (T2V / I2V / R2V).
 
-        Patched implementation: the old labs.google UI + aisandbox
-        interceptor path is gone. The project page's agent panel is
-        driven instead (see flow._flow_ui.AgentUI):
-
-          * the prompt is sent as an explicit video request — a bare
-            prompt would make the agent generate images instead;
-          * the agent's confirmation card quotes model + duration +
-            credit cost; the quote is verified against the official
-            model-config price and the card is approved only on an
-            exact match;
-          * completion is detected via the RPC media list, and the
-            returned VideoJob is already COMPLETE with fife_url set
-            (submission and completion are fused in agent mode).
-
-        The agent uses the project's saved agent settings (aspect,
-        model, duration); ``model``/``aspect`` are kept for signature
-        compatibility and are advisory only. ``start_image`` (I2V) is
-        not supported by the agent path yet.
+        Supports:
+          * Text-to-Video (T2V) with explicit model & aspect ratio directives;
+          * Image-to-Video (I2V) via ``start_image`` (project media_id or local file);
+          * Multi-reference Video (R2V) via ``reference_images``;
+          * Strict confirmation-card price verification against HTrJv before approval.
         """
-        if start_image:
-            raise GenerationError(
-                "start_image (I2V) is not supported by the agent UI path yet"
-            )
         from ._flow_ui import AgentUI
 
         rpc = self._api._rpc_client()
@@ -197,44 +284,61 @@ class FlowClient:
         page = await self._bm.page()
 
         cfg = await rpc.get_model_config()
+        verify = _make_cost_verifier(cfg)
 
-        def verify(parsed: dict) -> bool:
-            # The quote on the card is exactly what gets charged (verified
-            # live), so the invariant is: the quoted cost must be an
-            # official price for the model family named on the card —
-            # and when the card states a duration, it must be the
-            # official price for that exact duration.
-            cost, dur = parsed.get("cost"), parsed.get("duration_s")
-            if cost is None:
-                return False
-            raw = parsed.get("raw", "")
-            family = [
-                m for m in cfg.get("videoModels", [])
-                if m.get("displayName") and m["displayName"] in raw
-            ]
-            if not family:
-                return False
-            if dur is not None:
-                return any(
-                    m.get("durationS") == dur and m.get("creditCost") == cost
-                    for m in family
-                )
-            return any(m.get("creditCost") == cost for m in family)
+        aspect_label = _ASPECT_CN.get((aspect or "landscape").lower(), "16:9 横屏")
+        model_display = _VIDEO_MODEL_ALIASES.get(
+            (model or "").strip().lower(), (model or "Veo 3.1 - Fast").strip()
+        )
+        # Omni-only parameters (360p / 3s) or default I2V use Omni 1.2 Flash
+        if (
+            re.search(r"360p|3\s*秒", prompt or "", re.I)
+            or (start_image and model_display == "Veo 3.1 - Fast" and "veo" not in (prompt or "").lower())
+        ):
+            model_display = "Omni 1.2 Flash"
 
-        text = prompt
-        if not any(k in prompt for k in ("视频",)) and "video" not in prompt.lower():
-            text = "生成一段视频：" + prompt
+        base = (prompt or "").strip()
+        if start_image:
+            if not base.startswith("用这张图片"):
+                base = f"用这张图片作为首帧生成一段视频：{base}"
+        elif reference_images:
+            if "视频" not in base and "video" not in base.lower():
+                base = f"参考所附图片生成一段视频：{base}"
+        else:
+            if "视频" not in base and "video" not in base.lower():
+                base = f"生成一段视频：{base}"
+
+        clauses: list[str] = []
+        if not re.search(r"Omni|Veo", base, re.I) and model_display:
+            clauses.append(f"使用 {model_display} 模型")
+        if not re.search(r"16:9|9:16|横屏|竖屏", base):
+            clauses.append(aspect_label)
+        if start_image and model_display == "Omni 1.2 Flash":
+            if not re.search(r"\d+\s*秒", base):
+                clauses.append("时长 3 秒")
+            if not re.search(r"360p|720p|1080p", base, re.I):
+                clauses.append("分辨率 360p")
+        elif model_display == "Veo 3.1 - Lite" and not re.search(r"\d+\s*秒", base):
+            clauses.append("时长 4 秒")
+
+        text = base.rstrip("。.") + ("。" + "，".join(clauses) if clauses else "")
 
         jobs: list[VideoJob] = []
-        await agent.open_session(page)
         for _ in range(max(1, count)):
-            before = {
-                m["media_id"]
-                for m in (await rpc.list_project_media(self.project_id))["medias"]
-            }
-            await agent.run_turn(page, text, verify_cost=verify)
-            media = await self._wait_new_media(rpc, before, kind="video",
-                                               timeout_s=600)
+            await agent.open_session(page)
+            pm = await rpc.list_project_media(self.project_id)
+            if start_image:
+                await agent.attach_or_upload(page, rpc, pm, start_image)
+                pm = await rpc.list_project_media(self.project_id)
+            for ref in reference_images or []:
+                await agent.attach_or_upload(page, rpc, pm, ref)
+                pm = await rpc.list_project_media(self.project_id)
+
+            before = {m["media_id"] for m in pm["medias"]}
+            await agent.run_turn(page, text, verify_cost=verify, require_card=True)
+            media = await self._wait_new_media(
+                rpc, before, kind="video", timeout_s=max(timeout_s, 600)
+            )
             if media is None:
                 raise GenerationError(
                     "Agent approved the generation but no video appeared "
@@ -245,27 +349,30 @@ class FlowClient:
             job.status = "COMPLETE"
             job.project_id = self.project_id
             job.workflow_id = media.get("workflow_id", "")
-            job.fife_url = media["signed_url"] or await rpc.get_media_url(
-                media["media_id"]
-            )
+            job.fife_url = await rpc.get_media_url(media["media_id"])
             job.operation_name = ""
             job.remaining_credits = 0
             job.file_path = None
             job.elapsed_s = 0.0
             jobs.append(job)
-        log.info("Agent T2V complete: %d job(s)", len(jobs))
+        log.info("Agent video generation complete: %d job(s)", len(jobs))
         return jobs
 
     async def _wait_new_media(self, rpc, before_ids: set, *, kind: str,
                               timeout_s: int = 600):
-        """Poll the RPC media list until a new media of *kind* appears."""
+        """Poll the RPC media list until a new media of *kind* has a signed URL."""
         deadline = asyncio.get_event_loop().time() + timeout_s
         while asyncio.get_event_loop().time() < deadline:
             pm = await rpc.list_project_media(self.project_id)
             for m in pm["medias"]:
                 if m["media_id"] not in before_ids and m["kind"] == kind:
-                    return m
-            await asyncio.sleep(10)
+                    url = await rpc.get_media_url(m["media_id"])
+                    if not url and kind == "image":
+                        url = m.get("poster_url", "")
+                    if url:
+                        m["signed_url"] = url
+                        return m
+            await asyncio.sleep(6)
         return None
 
     async def generate_image(
@@ -274,23 +381,17 @@ class FlowClient:
         *,
         aspect: str = "landscape",
         count: int = 1,
+        model: Optional[str] = None,
         reference_images: Optional[list[str]] = None,
         timeout_s: int = 120,
     ) -> list[GeneratedImage]:
         """
         Generate images via the flow.google.com creation agent.
 
-        Patched implementation: a bare prompt makes the agent generate
-        images with the project's saved image settings (default Nano
-        Banana 2.1 x2 on this account — the number returned is whatever
-        the agent produced). Image generation is free on the current
-        tier; if a confirmation card ever quotes a cost above 0 the
-        turn is aborted instead of approved.
+        Supports aspect ratio, count, model name, and reference images.
+        Image generation is free on the current tier; if a confirmation
+        card ever quotes a cost above 0 the turn is aborted immediately.
         """
-        if reference_images:
-            raise GenerationError(
-                "reference_images are not supported by the agent UI path yet"
-            )
         from ._flow_ui import AgentUI
 
         rpc = self._api._rpc_client()
@@ -300,12 +401,19 @@ class FlowClient:
         def verify_free(parsed: dict) -> bool:
             return parsed.get("cost") == 0
 
-        before = {
-            m["media_id"]
-            for m in (await rpc.list_project_media(self.project_id))["medias"]
-        }
         await agent.open_session(page)
-        await agent.run_turn(page, prompt, card_timeout_s=60,
+        pm = await rpc.list_project_media(self.project_id)
+        for ref in reference_images or []:
+            await agent.attach_or_upload(page, rpc, pm, ref)
+            pm = await rpc.list_project_media(self.project_id)
+
+        before = {m["media_id"] for m in pm["medias"]}
+        aspect_label = _ASPECT_CN.get((aspect or "landscape").lower(), "16:9 横屏")
+        prefix = "参考所附图片，" if reference_images else ""
+        model_clause = f"，使用 {model} 模型" if model else ""
+        text = f"{prefix}生成 {max(1, count)} 张 {aspect_label} 图片：{prompt}{model_clause}"
+
+        await agent.run_turn(page, text, card_timeout_s=60,
                              verify_cost=verify_free)
         images: list[GeneratedImage] = []
         deadline = asyncio.get_event_loop().time() + max(timeout_s, 300)
@@ -313,16 +421,19 @@ class FlowClient:
             pm = await rpc.list_project_media(self.project_id)
             new = [m for m in pm["medias"]
                    if m["media_id"] not in before and m["kind"] == "image"]
-            if new:
-                for m in new:
+            ready = []
+            for m in new:
+                url = await rpc.get_media_url(m["media_id"]) or m.get("poster_url", "")
+                if url:
+                    ready.append((m, url))
+            if ready and len(ready) == len(new):
+                for m, url in ready:
                     img = GeneratedImage.__new__(GeneratedImage)
                     img._raw = {}
                     img.media_name = m["media_id"]
                     img.project_id = self.project_id
                     img.workflow_id = m.get("workflow_id", "")
-                    img.fife_url = await rpc.get_media_url(
-                        m["media_id"]
-                    ) or m["poster_url"]
+                    img.fife_url = url
                     img.seed = 0
                     img.model = m.get("model_key", "")
                     img.file_path = None
@@ -330,7 +441,7 @@ class FlowClient:
                     img.dimensions = {}
                     images.append(img)
                 break
-            await asyncio.sleep(8)
+            await asyncio.sleep(6)
         if not images:
             raise GenerationError(
                 "Agent finished the turn but no image appeared in the "
@@ -339,7 +450,77 @@ class FlowClient:
         log.info("Agent T2I complete: %d image(s)", len(images))
         return images
 
-    # ── Edit-page operations ──────────────────────────────────────────────────
+    # ── Video edit operations (agent panel + edit page upscale) ───────────────
+
+    async def _run_video_edit_turn(
+        self,
+        media_id: str,
+        instruction: str,
+        *,
+        use_source_duration: bool = True,
+        expected_duration_s: Optional[int] = None,
+        timeout_s: int = 120,
+    ) -> VideoJob:
+        """Attach *media_id* in a fresh agent session, verify card price, and wait."""
+        from ._flow_ui import AgentUI
+
+        rpc = self._api._rpc_client()
+        agent = AgentUI(self._bm, self.project_id)
+        page = await self._bm.page()
+
+        pm = await rpc.list_project_media(self.project_id)
+        target = next(
+            (m for m in pm["medias"]
+             if m["media_id"] == media_id or m["media_id"].startswith(media_id)),
+            None,
+        )
+        if target is None:
+            raise NotFoundError(
+                f"Media {media_id} not found in project {self.project_id}"
+            )
+
+        cfg = await rpc.get_model_config()
+        dur_hint = expected_duration_s
+        if dur_hint is None and use_source_duration:
+            wf_id = target.get("workflow_id") or ""
+            wf_durs = {
+                m.get("duration_s")
+                for m in pm["medias"]
+                if (m["media_id"] == target["media_id"] or (wf_id and m.get("workflow_id") == wf_id))
+                and m.get("duration_s")
+            }
+            dur_hint = wf_durs or target.get("duration_s")
+        verify = _make_cost_verifier(
+            cfg,
+            expected_duration_s=dur_hint,
+            default_family="Omni 1.2 Flash",
+        )
+
+        before = {m["media_id"] for m in pm["medias"]}
+        await agent.open_session(page)
+        await agent.attach_media(page, pm, target["media_id"])
+        await agent.run_turn(
+            page, instruction, verify_cost=verify, require_card=True
+        )
+        media = await self._wait_new_media(
+            rpc, before, kind="video", timeout_s=max(timeout_s, 600)
+        )
+        if media is None:
+            raise GenerationError(
+                "Agent approved the video edit but no new video appeared "
+                "in the project media list within the timeout"
+            )
+        job = VideoJob.__new__(VideoJob)
+        job.media_name = media["media_id"]
+        job.status = "COMPLETE"
+        job.project_id = self.project_id
+        job.workflow_id = media.get("workflow_id", "")
+        job.fife_url = await rpc.get_media_url(media["media_id"])
+        job.operation_name = ""
+        job.remaining_credits = 0
+        job.file_path = None
+        job.elapsed_s = 0.0
+        return job
 
     async def extend_video(
         self,
@@ -350,39 +531,24 @@ class FlowClient:
         timeout_s: int = 120,
     ) -> VideoJob:
         """
-        Extend a video to make it longer.
+        Extend a video via the flow.google.com creation agent.
 
-        Navigates to the edit page, clicks Extend, optionally fills a prompt,
-        clicks Create, and returns a PENDING VideoJob.
-
-        Uses endpoint: batchAsyncGenerateVideoExtendVideo
-        Model: veo_3_1_extend_fast_landscape
-        Cost: same as T2V (uses credits)
+        Attaches the source video chip and asks Omni 1.2 Flash to extend it
+        (default: 3s at 360p = 3 credits unless duration/resolution is in prompt).
         """
-        raise GenerationError(
-            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        m_dur = re.search(r"(\d+)\s*秒", prompt or "")
+        ext_dur = int(m_dur.group(1)) if m_dur else 3
+        res_clause = "" if re.search(r"360p|720p|1080p", prompt or "", re.I) else "，分辨率 360p"
+        body = (prompt or "自然延续画面动作与场景").strip().rstrip("。.")
+        if m_dur:
+            text = f"使用 Omni 1.2 Flash 模型把这个视频延长：{body}{res_clause}。"
+        else:
+            text = f"使用 Omni 1.2 Flash 模型把这个视频延长 {ext_dur} 秒：{body}{res_clause}。"
+        job = await self._run_video_edit_turn(
+            media_id, text, use_source_duration=False,
+            expected_duration_s=ext_dur, timeout_s=timeout_s,
         )
-        wid = workflow_id or self.workflow_id or ""
-        page = await self._bm.page()
-        await self._ui.navigate_to_edit(page, self.project_id, wid)
-
-        interceptor = UIInterceptor()
-        interceptor.attach(page)
-
-        await self._ui.click_extend(page)
-        await self._ui.fill_extend_prompt(page, prompt or "Continue the scene")
-        await self._ui.click_create_in_panel(page)
-
-        entry = await interceptor.wait_for(
-            "batchAsyncGenerateVideoExtendVideo", timeout=timeout_s, require_success=True
-        )
-
-        media_name = UIInterceptor.extract_video_media_name(entry.resp) or ""
-        job = VideoJob.__new__(VideoJob)
-        job.media_name = media_name
-        job.status = "PENDING"
-        job.project_id = self.project_id
-        log.info("Extend submitted → %s", media_name[:16])
+        log.info("Agent extend complete → %s", job.media_name[:16])
         return job
 
     async def extend_loop(
@@ -397,29 +563,7 @@ class FlowClient:
         poll_s: float = 5.0,
         timeout_s: int = 300,
     ) -> list[VideoJob]:
-        """
-        Extend a video *iterations* times in sequence → create arbitrarily long videos!
-
-        Each extension takes the result of the previous as input.
-        The workflow_id stays constant (points to the original workflow);
-        the mediaId advances with each extension.
-
-        Args:
-            media_id:    Starting media UUID
-            workflow_id: Workflow UUID
-            iterations:  Number of extensions (e.g. 10 = ~80 seconds of video)
-            prompt:      Optional narrative prompt for each extension
-            output_dir:  If set, downloads each extended video here
-            wait:        Wait for each extension before starting the next
-            poll_s:      Poll interval when waiting
-            timeout_s:   Per-extension generation timeout
-
-        Returns:
-            List of VideoJob (all PENDING if wait=False, all complete if wait=True)
-        """
-        raise GenerationError(
-            "This edit operation has not been ported to the flow.google.com agent UI yet"
-        )
+        """Extend a video *iterations* times in sequence via the agent."""
         jobs: list[VideoJob] = []
         current_id = media_id
         out = Path(output_dir) if output_dir else None
@@ -451,45 +595,18 @@ class FlowClient:
         *,
         timeout_s: int = 120,
     ) -> VideoJob:
-        """
-        Apply a camera motion to a video.
-
-        Args:
-            media_id: Source video media UUID
-            motion:   Motion key. Supported values:
-                        "dolly_in", "dolly_out",
-                        "orbit_left", "orbit_right", "orbit_up", "orbit_low",
-                        "dolly_zoom_in", "dolly_zoom_out"
-            workflow_id: Workflow UUID
-
-        Uses endpoint: batchAsyncGenerateVideoReshootVideo
-        Model: veo_3_0_reshoot_landscape
-        """
-        raise GenerationError(
-            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        """Apply a camera motion to a video via the creation agent (Omni 1.2 Flash)."""
+        motion_label = CAMERA_MOTIONS.get(motion.lower())
+        if not motion_label:
+            raise InvalidArgumentError(
+                f"Unknown camera motion '{motion}'. Valid: {list(CAMERA_MOTIONS)}"
+            )
+        desc = _CAMERA_MOTION_CN.get(motion_label, motion_label)
+        text = f"使用 Omni 1.2 Flash 模型给这个视频重新运镜：{desc}，画面主体内容保持不变，分辨率 360p。"
+        job = await self._run_video_edit_turn(
+            media_id, text, use_source_duration=True, timeout_s=timeout_s
         )
-        motion_label = CAMERA_MOTIONS.get(motion.lower(), motion)
-        wid = workflow_id or self.workflow_id or ""
-        page = await self._bm.page()
-        await self._ui.navigate_to_edit(page, self.project_id, wid)
-
-        interceptor = UIInterceptor()
-        interceptor.attach(page)
-
-        await self._ui.click_camera(page)
-        await self._ui.select_camera_motion(page, motion_label)
-        await self._ui.click_camera_create(page)
-
-        entry = await interceptor.wait_for(
-            "batchAsyncGenerateVideoReshootVideo", timeout=timeout_s, require_success=True
-        )
-
-        media_name = UIInterceptor.extract_video_media_name(entry.resp) or ""
-        job = VideoJob.__new__(VideoJob)
-        job.media_name = media_name
-        job.status = "PENDING"
-        job.project_id = self.project_id
-        log.info("Camera motion '%s' submitted → %s", motion, media_name[:16])
+        log.info("Agent camera motion '%s' complete → %s", motion, job.media_name[:16])
         return job
 
     async def camera_position(
@@ -500,39 +617,18 @@ class FlowClient:
         *,
         timeout_s: int = 120,
     ) -> VideoJob:
-        """
-        Apply a camera position change to a video.
-
-        Args:
-            position: "center", "left", "right", "high", "low", "closer", "further"
-
-        Uses the same ReshootVideo endpoint with STATIONARY_* motion types.
-        """
-        raise GenerationError(
-            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        """Apply a camera position change to a video via the creation agent."""
+        pos_label = CAMERA_POSITIONS.get(position.lower())
+        if not pos_label:
+            raise InvalidArgumentError(
+                f"Unknown camera position '{position}'. Valid: {list(CAMERA_POSITIONS)}"
+            )
+        desc = _CAMERA_POS_CN.get(pos_label, pos_label)
+        text = f"使用 Omni 1.2 Flash 模型调整这个视频的机位：把摄像机位置调整为{desc}，画面主体内容保持不变，分辨率 360p。"
+        job = await self._run_video_edit_turn(
+            media_id, text, use_source_duration=True, timeout_s=timeout_s
         )
-        pos_label = CAMERA_POSITIONS.get(position.lower(), position.title())
-        wid = workflow_id or self.workflow_id or ""
-        page = await self._bm.page()
-        await self._ui.navigate_to_edit(page, self.project_id, wid)
-
-        interceptor = UIInterceptor()
-        interceptor.attach(page)
-
-        await self._ui.click_camera(page)
-        await self._ui.select_camera_position(page, pos_label)
-        await self._ui.click_camera_create(page)
-
-        entry = await interceptor.wait_for(
-            "batchAsyncGenerateVideoReshootVideo", timeout=timeout_s, require_success=True
-        )
-
-        media_name = UIInterceptor.extract_video_media_name(entry.resp) or ""
-        job = VideoJob.__new__(VideoJob)
-        job.media_name = media_name
-        job.status = "PENDING"
-        job.project_id = self.project_id
-        log.info("Camera position '%s' submitted → %s", position, media_name[:16])
+        log.info("Agent camera position '%s' complete → %s", position, job.media_name[:16])
         return job
 
     async def insert_object(
@@ -543,37 +639,15 @@ class FlowClient:
         *,
         timeout_s: int = 120,
     ) -> VideoJob:
-        """
-        Insert an object into a video using a text prompt.
-
-        Uses endpoint: batchAsyncGenerateVideoObjectInsertion
-        Model: veo_2_0_object_insertion_landscape
-        """
-        raise GenerationError(
-            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        """Insert an object into a video using a text prompt via the creation agent."""
+        body = (prompt or "").strip().rstrip("。.")
+        if not body:
+            raise InvalidArgumentError("insert_object requires a non-empty prompt")
+        text = f"使用 Omni 1.2 Flash 模型对这个视频进行编辑，在画面中加入：{body}，其余内容保持不变，分辨率 360p。"
+        job = await self._run_video_edit_turn(
+            media_id, text, use_source_duration=True, timeout_s=timeout_s
         )
-        wid = workflow_id or self.workflow_id or ""
-        page = await self._bm.page()
-        await self._ui.navigate_to_edit(page, self.project_id, wid)
-
-        interceptor = UIInterceptor()
-        interceptor.attach(page)
-
-        await self._ui.click_insert(page)
-        if prompt:
-            await self._ui.fill_insert_prompt(page, prompt)
-        await self._ui.click_create_in_panel(page)
-
-        entry = await interceptor.wait_for(
-            "batchAsyncGenerateVideoObjectInsertion", timeout=timeout_s, require_success=True
-        )
-
-        media_name = UIInterceptor.extract_video_media_name(entry.resp) or ""
-        job = VideoJob.__new__(VideoJob)
-        job.media_name = media_name
-        job.status = "PENDING"
-        job.project_id = self.project_id
-        log.info("Insert submitted → %s", media_name[:16])
+        log.info("Agent insert complete → %s", job.media_name[:16])
         return job
 
     async def remove_object(
@@ -584,46 +658,32 @@ class FlowClient:
         mask_x: float = 0.5,
         mask_y: float = 0.5,
         brush_size: int = 40,
+        prompt: str = "",
         timeout_s: int = 120,
     ) -> VideoJob:
         """
-        Remove an object from a video by drawing a mask.
+        Remove an object from a video via the creation agent (Omni 1.2 Flash).
 
-        Click Remove, draw brush strokes over the object to create the mask,
-        then click Create.
-
-        Args:
-            mask_x:     Horizontal center of mask (0.0=left, 1.0=right)
-            mask_y:     Vertical center of mask (0.0=top, 1.0=bottom)
-            brush_size: Brush radius in pixels
-
-        Uses endpoint: batchAsyncGenerateVideoObjectRemoval
-        Model: veo_2_0_object_removal_landscape
+        Note: The old labs.google pixel brush mask canvas is gone in the
+        flow.google.com SPA. Object removal now runs through Omni 1.2 Flash
+        video editing using either an explicit object description (``prompt``)
+        or a natural-language region description derived from ``(mask_x, mask_y)``.
         """
-        raise GenerationError(
-            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        body = (prompt or "").strip().rstrip("。.")
+        if body:
+            target_desc = body
+        else:
+            horiz = "左侧" if mask_x < 0.35 else ("右侧" if mask_x > 0.65 else "中央")
+            vert = "上方" if mask_y < 0.35 else ("下方" if mask_y > 0.65 else "中部")
+            target_desc = f"画面{vert}{horiz}区域的前景物体或杂物"
+        text = (
+            f"使用 Omni 1.2 Flash 模型对这个视频进行编辑，"
+            f"将{target_desc}移除并自然补全背景，其余画面内容保持不变，分辨率 360p。"
         )
-        wid = workflow_id or self.workflow_id or ""
-        page = await self._bm.page()
-        await self._ui.navigate_to_edit(page, self.project_id, wid)
-
-        interceptor = UIInterceptor()
-        interceptor.attach(page)
-
-        await self._ui.click_remove(page)
-        await self._ui.draw_removal_mask(page, mask_x, mask_y, brush_size / 100.0)
-        await self._ui.click_create_in_panel(page)
-
-        entry = await interceptor.wait_for(
-            "batchAsyncGenerateVideoObjectRemoval", timeout=timeout_s, require_success=True
+        job = await self._run_video_edit_turn(
+            media_id, text, use_source_duration=True, timeout_s=timeout_s
         )
-
-        media_name = UIInterceptor.extract_video_media_name(entry.resp) or ""
-        job = VideoJob.__new__(VideoJob)
-        job.media_name = media_name
-        job.status = "PENDING"
-        job.project_id = self.project_id
-        log.info("Remove submitted → %s", media_name[:16])
+        log.info("Agent remove complete → %s", job.media_name[:16])
         return job
 
     async def upscale_video(
@@ -635,48 +695,101 @@ class FlowClient:
         timeout_s: int = 120,
     ) -> VideoJob:
         """
-        Upscale a video to higher resolution.
+        Upscale a video via the edit-page download menu (1080p = 0 credits FREE).
 
-        FREE (0 credits)! Uses the Download panel → click "1080p Upscaled".
-
-        Args:
-            resolution: "1080p" (free) or "4k" (may require upgrade)
-
-        Uses endpoint: batchAsyncGenerateVideoUpsampleVideo
-        Model: veo_3_1_upsampler_1080p
-        Cost: 0 credits (FREE!)
+        Navigates to ``/project/<id>/edit/<workflow_id>``, opens the download
+        menu, verifies the credit cost on the menu item against HTrJv, clicks
+        the target resolution, and polls ``as29s`` until ``<media_id>_upsampled``
+        has a freshly signed download URL.
         """
-        raise GenerationError(
-            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        rpc = self._api._rpc_client()
+        pm = await rpc.list_project_media(self.project_id)
+        target = next(
+            (m for m in pm["medias"]
+             if m["media_id"] == media_id or m["media_id"].startswith(media_id)),
+            None,
         )
-        wid = workflow_id or self.workflow_id or ""
-        page = await self._bm.page()
-        await self._ui.navigate_to_edit(page, self.project_id, wid)
-
-        interceptor = UIInterceptor()
-        interceptor.attach(page)
-
-        await self._ui.click_download_button(page)
-        await asyncio.sleep(0.5)
-        if resolution.lower() in ("4k", "4096"):
-            await self._ui.click_upscale_4k(page)
+        if target is not None:
+            media_id = target["media_id"]
+            wid = target.get("workflow_id") or workflow_id or self.workflow_id or ""
         else:
-            await self._ui.click_upscale_1080p(page)
+            wid = workflow_id or self.workflow_id or ""
+        if not wid:
+            raise NotFoundError(
+                f"Workflow ID for media {media_id} not found in project {self.project_id}"
+            )
 
-        entry = await interceptor.wait_for(
-            "batchAsyncGenerateVideoUpsampleVideo", timeout=timeout_s, require_success=True
-        )
+        is_4k = resolution.lower() in ("4k", "4096")
+        upsampled_id = f"{media_id}_upsampled"
 
-        media_name = UIInterceptor.extract_video_media_name(entry.resp) or ""
-        # Upscale returns: original_media_id + "_upsampled"
-        if not media_name:
-            media_name = f"{media_id}_upsampled"
+        page = await self._bm.page()
+        edit_url = f"https://flow.google.com/project/{self.project_id}/edit/{wid}"
+        await page.goto(edit_url, wait_until="domcontentloaded", timeout=30_000)
+        await asyncio.sleep(6)
 
+        dl_btn = page.locator("button[aria-label='下载媒体内容']").first
+        await dl_btn.click(timeout=15_000)
+        await asyncio.sleep(1.5)
+
+        label_key = "4K" if is_4k else "1080p"
+        item = page.locator(".cdk-overlay-container [role=menuitem]").filter(
+            has_text=label_key
+        ).first
+        if await item.count() == 0:
+            raise GenerationError(f"Upscale option '{label_key}' not found in download menu")
+        item_text = await item.inner_text()
+        if not is_4k and "消耗" in item_text:
+            raise GenerationError(
+                f"1080p upscale unexpectedly quotes a credit cost: {item_text!r} — aborting"
+            )
+        if is_4k:
+            cfg = await rpc.get_model_config()
+            m_cost = re.search(r"消耗\s*(\d+)\s*个点数", item_text)
+            quoted = int(m_cost.group(1)) if m_cost else None
+            official = next(
+                (m.get("creditCost") for m in cfg.get("videoModels", [])
+                 if m.get("key") == "veo_3_1_upsampler_4k"),
+                None,
+            )
+            if quoted is None or quoted != official:
+                raise GenerationError(
+                    f"4K upscale menu cost {quoted} does not match official {official} — aborting"
+                )
+
+        # Capture direct browser download if triggered, and poll as29s for _upsampled
+        dl_events = []
+        on_dl = lambda d: dl_events.append(d)
+        page.on("download", on_dl)
+        try:
+            await item.click(timeout=8000)
+            deadline = asyncio.get_event_loop().time() + max(timeout_s, 180)
+            url = ""
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(5)
+                url = await rpc.get_media_url(upsampled_id)
+                if url:
+                    break
+        finally:
+            try:
+                page.remove_listener("download", on_dl)
+            except Exception:
+                pass
+
+        if not url:
+            raise GenerationError(
+                f"Upscale timed out waiting for signed URL of {upsampled_id}"
+            )
         job = VideoJob.__new__(VideoJob)
-        job.media_name = media_name
-        job.status = "PENDING"
+        job.media_name = upsampled_id
+        job.status = "COMPLETE"
         job.project_id = self.project_id
-        log.info("Upscale submitted → %s (FREE!)", media_name[:20])
+        job.workflow_id = wid
+        job.fife_url = url
+        job.operation_name = ""
+        job.remaining_credits = 0
+        job.file_path = None
+        job.elapsed_s = 0.0
+        log.info("Upscale complete → %s", upsampled_id)
         return job
 
     # ══════════════════════════════════════════════════════════════════════════

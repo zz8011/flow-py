@@ -492,13 +492,14 @@ def download(media_id: str, output: str, project: Optional[str], cdp: bool):
 @click.option("--model",  "-m", default="Veo 3.1 - Fast", show_default=True, help="Model display name")
 @click.option("--aspect", "-a", default="landscape", type=click.Choice(["landscape", "portrait"]), show_default=True)
 @click.option("--count",  "-n", default=1, type=click.IntRange(1, 4), show_default=True)
-@click.option("--start",  default=None, help="Image path for I2V (Image-to-Video) mode")
+@click.option("--start",  default=None, help="Image path or media_id for I2V (Image-to-Video) mode")
+@click.option("--reference", "-r", "reference_images", multiple=True, help="Reference image path(s) or media_id(s)")
 @click.option("--wait/--no-wait", default=True, show_default=True)
 @click.option("--output", "-o", default="./flow_output", show_default=True)
 @click.option("--headless/--headed", default=True, show_default=True)
 @click.option("--cdp", is_flag=True, help="Connect to existing Chrome CDP (port 9222)")
 def video(
-    prompt, project, workflow, model, aspect, count, start, wait, output, headless, cdp
+    prompt, project, workflow, model, aspect, count, start, reference_images, wait, output, headless, cdp
 ):
     """Generate video(s) from text (T2V) or image (I2V).
 
@@ -506,7 +507,7 @@ def video(
         flow video "golden lotus blooming"\n
         flow video "lotus at dawn" --aspect portrait -n 2\n
         flow video "lotus blooms" --start ./frame.jpg  # I2V\n
-        flow video "temple sunrise" --model "Veo 2.1"
+        flow video "temple sunrise" --model "Veo 3.1 - Lite"
     """
     async def _go():
         client = await _make_client(project, workflow, headless=headless, cdp=cdp)
@@ -514,10 +515,17 @@ def video(
             click.echo(f"🎬 Generating video: \"{prompt[:60]}\"")
             if start:
                 click.echo(f"   Mode: Image-to-Video  source: {start}")
+            if reference_images:
+                click.echo(f"   References: {len(reference_images)}")
             click.echo(f"   Model: {model}  aspect: {aspect}  count: {count}")
 
             jobs = await client.generate_video(
-                prompt, model=model, aspect=aspect, count=count, start_image=start
+                prompt,
+                model=model,
+                aspect=aspect,
+                count=count,
+                start_image=start,
+                reference_images=list(reference_images) if reference_images else None,
             )
             click.echo(f"✅ Submitted {len(jobs)} job(s)")
             for j in jobs:
@@ -549,14 +557,16 @@ def video(
 @cli.command()
 @click.argument("prompt")
 @click.option("--project", "-p", default=None)
+@click.option("--model",   "-m", default=None, help="Image model display name")
 @click.option("--aspect", "-a", default="landscape",
               type=click.Choice(["landscape", "portrait", "square"]), show_default=True)
 @click.option("--count",  "-n", default=4, type=click.IntRange(1, 4), show_default=True)
+@click.option("--reference", "-r", "reference_images", multiple=True, help="Reference image path(s) or media_id(s)")
 @click.option("--output", "-o", default="./flow_images", show_default=True)
 @click.option("--headless/--headed", default=True, show_default=True)
 @click.option("--cdp", is_flag=True)
-def image(prompt, project, aspect, count, output, headless, cdp):
-    """Generate images from text (T2I).
+def image(prompt, project, model, aspect, count, reference_images, output, headless, cdp):
+    """Generate images from text (T2I) or reference images.
 
     Examples:\n
         flow image "golden lotus temple" -n 4\n
@@ -566,7 +576,13 @@ def image(prompt, project, aspect, count, output, headless, cdp):
         client = await _make_client(project, headless=headless, cdp=cdp)
         try:
             click.echo(f"🖼️  Generating {count} image(s): \"{prompt[:60]}\"")
-            imgs = await client.generate_image(prompt, aspect=aspect, count=count)
+            imgs = await client.generate_image(
+                prompt,
+                aspect=aspect,
+                count=count,
+                model=model,
+                reference_images=list(reference_images) if reference_images else None,
+            )
             out = Path(output)
             out.mkdir(parents=True, exist_ok=True)
             click.echo(f"✅ Got {len(imgs)} image(s)")
@@ -591,7 +607,7 @@ def image(prompt, project, aspect, count, output, headless, cdp):
 
 @cli.command()
 @click.argument("media_id")
-@click.option("--workflow", "-w", required=True, help="Workflow ID")
+@click.option("--workflow", "-w", default=None, help="Workflow ID (auto-resolved if omitted)")
 @click.option("--prompt",   "-p", default="", help="Narrative prompt for extension")
 @click.option("--project",  default=None)
 @click.option("--wait/--no-wait", default=True)
@@ -630,7 +646,7 @@ def extend(media_id, workflow, prompt, project, wait, output, headless, cdp):
 
 @cli.command("extend-loop")
 @click.argument("media_id")
-@click.option("--workflow",   "-w", required=True, help="Workflow ID")
+@click.option("--workflow",   "-w", default=None, help="Workflow ID (auto-resolved if omitted)")
 @click.option("--iterations", "-n", default=5, show_default=True, help="Number of extensions")
 @click.option("--prompt",     "-p", default="", help="Narrative prompt (same for all extensions)")
 @click.option("--output",     "-o", default="./flow_extensions", show_default=True)
@@ -669,7 +685,7 @@ def extend_loop(media_id, workflow, iterations, prompt, output, project, headles
 
 @cli.command()
 @click.argument("media_id")
-@click.option("--workflow", "-w", required=True)
+@click.option("--workflow", "-w", default=None)
 @click.option("--motion",
               type=click.Choice(list(CAMERA_MOTIONS.keys()), case_sensitive=False),
               required=True,
@@ -703,6 +719,8 @@ def camera(media_id, workflow, motion, project, wait, output, headless, cdp):
                 if output and status.fife_url:
                     await client.download(status.fife_url, output)
                     click.echo(f"💾 {output}")
+                elif status.fife_url:
+                    click.echo(f"URL: {status.fife_url[:80]}")
         except (GenerationError, GenerationTimeout) as e:
             click.echo(f"\n❌ {e}", err=True)
             sys.exit(1)
@@ -713,7 +731,7 @@ def camera(media_id, workflow, motion, project, wait, output, headless, cdp):
 
 @cli.command("camera-pos")
 @click.argument("media_id")
-@click.option("--workflow",  "-w", required=True)
+@click.option("--workflow",  "-w", default=None)
 @click.option("--position",
               type=click.Choice(list(CAMERA_POSITIONS.keys()), case_sensitive=False),
               required=True)
@@ -741,6 +759,9 @@ def camera_pos(media_id, workflow, position, project, wait, output, headless, cd
                 click.echo(f"\n✅ {status.status}")
                 if output and status.fife_url:
                     await client.download(status.fife_url, output)
+                    click.echo(f"💾 {output}")
+                elif status.fife_url:
+                    click.echo(f"URL: {status.fife_url[:80]}")
         except (GenerationError, GenerationTimeout) as e:
             click.echo(f"\n❌ {e}", err=True)
             sys.exit(1)
@@ -751,7 +772,7 @@ def camera_pos(media_id, workflow, position, project, wait, output, headless, cd
 
 @cli.command()
 @click.argument("media_id")
-@click.option("--workflow", "-w", required=True)
+@click.option("--workflow", "-w", default=None)
 @click.option("--text",     "-t", required=True, help="Object description to insert")
 @click.option("--project",  default=None)
 @click.option("--wait/--no-wait", default=True)
@@ -775,6 +796,9 @@ def insert(media_id, workflow, text, project, wait, output, headless, cdp):
                 click.echo(f"\n✅ {status.status}")
                 if output and status.fife_url:
                     await client.download(status.fife_url, output)
+                    click.echo(f"💾 {output}")
+                elif status.fife_url:
+                    click.echo(f"URL: {status.fife_url[:80]}")
         except (GenerationError, GenerationTimeout) as e:
             click.echo(f"\n❌ {e}", err=True)
             sys.exit(1)
@@ -785,17 +809,18 @@ def insert(media_id, workflow, text, project, wait, output, headless, cdp):
 
 @cli.command()
 @click.argument("media_id")
-@click.option("--workflow", "-w", required=True)
+@click.option("--workflow", "-w", default=None)
 @click.option("--x",   default=0.5, show_default=True, help="Mask center X (0.0-1.0)")
 @click.option("--y",   default=0.5, show_default=True, help="Mask center Y (0.0-1.0)")
 @click.option("--brush", default=40, show_default=True, help="Brush size (pixels)")
+@click.option("--text", "-t", default="", help="Object description to remove (agent mode)")
 @click.option("--project",  default=None)
 @click.option("--wait/--no-wait", default=True)
 @click.option("--output",   "-o", default=None)
 @click.option("--headless/--headed", default=True)
 @click.option("--cdp", is_flag=True)
-def remove(media_id, workflow, x, y, brush, project, wait, output, headless, cdp):
-    """Remove an object from a video by drawing a mask.
+def remove(media_id, workflow, x, y, brush, text, project, wait, output, headless, cdp):
+    """Remove an object from a video via agent editing.
 
     Example:\n
         flow remove abc123 -w wf456 --x 0.7 --y 0.3 --brush 60
@@ -804,13 +829,18 @@ def remove(media_id, workflow, x, y, brush, project, wait, output, headless, cdp
         client = await _make_client(project, workflow, headless=headless, cdp=cdp)
         try:
             click.echo(f"✂️  Removing object at ({x:.1f},{y:.1f}) from {media_id[:16]}...")
-            job = await client.remove_object(media_id, workflow, mask_x=x, mask_y=y, brush_size=brush)
+            job = await client.remove_object(
+                media_id, workflow, mask_x=x, mask_y=y, brush_size=brush, prompt=text
+            )
             click.echo(f"✅ Submitted → {job.media_name[:20]}")
             if wait:
                 status = await client.wait_for_video(job, on_poll=_poll_cb)
                 click.echo(f"\n✅ {status.status}")
                 if output and status.fife_url:
                     await client.download(status.fife_url, output)
+                    click.echo(f"💾 {output}")
+                elif status.fife_url:
+                    click.echo(f"URL: {status.fife_url[:80]}")
         except (GenerationError, GenerationTimeout) as e:
             click.echo(f"\n❌ {e}", err=True)
             sys.exit(1)
@@ -821,7 +851,7 @@ def remove(media_id, workflow, x, y, brush, project, wait, output, headless, cdp
 
 @cli.command()
 @click.argument("media_id")
-@click.option("--workflow",    "-w", required=True)
+@click.option("--workflow",    "-w", default=None)
 @click.option("--resolution",  "-r", default="1080p",
               type=click.Choice(["1080p", "4k"]), show_default=True)
 @click.option("--project",     default=None)

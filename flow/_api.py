@@ -1198,14 +1198,29 @@ class FlowAPI:
         # Patched: agent-mode generations surface in the project's media
         # list once complete; absence means still generating.
         pid = project_id or self.project_id
-        pm = await self._rpc_client().list_project_media(pid)
+        rpc = self._rpc_client()
+        pm = await rpc.list_project_media(pid)
         for m in pm["medias"]:
             if m["media_id"] == media_name:
-                url = m["signed_url"]
+                # Always sign freshly via as29s; for videos, empty URL means still rendering.
+                url = await rpc.get_media_url(media_name)
+                if not url and m.get("kind") == "image":
+                    url = m.get("poster_url", "")
                 if not url:
-                    # The listing carries no signed URLs; resolve per media.
-                    url = await self._rpc_client().get_media_url(media_name)
-                url = url or m["poster_url"]
+                    break
+                return VideoStatus({
+                    "media": [{
+                        "name": media_name,
+                        "mediaMetadata": {"mediaStatus": {
+                            "mediaGenerationStatus": "MEDIA_GENERATION_STATUS_SUCCESSFUL"}},
+                        "video": {"generatedVideo": {"fifeUrl": url}},
+                        "image": {"generatedImage": {"fifeUrl": url}},
+                    }],
+                })
+        # Upscaled media (<id>_upsampled) is resolved directly via as29s.
+        if media_name.endswith("_upsampled"):
+            url = await rpc.get_media_url(media_name)
+            if url:
                 return VideoStatus({
                     "media": [{
                         "name": media_name,

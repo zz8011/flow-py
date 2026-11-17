@@ -194,6 +194,7 @@ class FlowRPC:
         return {
             "credits": int(data[0]),
             "userPaygateTier": data[1] if len(data) > 1 else "",
+            "priceTier": data[2] if len(data) > 2 and isinstance(data[2], int) else (data[1] if len(data) > 1 else 1),
             "sku": "",
             "serviceTier": "",
             "reset_ts": reset_ts,
@@ -202,7 +203,7 @@ class FlowRPC:
     async def get_tier(self) -> int:
         raw = await self.get_credits()
         try:
-            return int(raw.get("userPaygateTier") or 1)
+            return int(raw.get("priceTier") or raw.get("userPaygateTier") or 1)
         except (TypeError, ValueError):
             return 1
 
@@ -268,17 +269,50 @@ class FlowRPC:
                 key = variant[0]
                 cost = None
                 tiers = variant[4] if len(variant) > 4 else None
+                tier_mentioned = False
                 if isinstance(tiers, list):
                     by_tier = {}
                     for t in tiers:
-                        if isinstance(t, list) and len(t) == 2 and isinstance(t[1], list):
-                            for c in t[1]:
-                                if isinstance(c, list) and len(c) == 2 and isinstance(c[1], (int, float)):
-                                    by_tier[t[0]] = c[1]
-                    cost = by_tier.get(tier)
-                    if cost is None and by_tier:
+                        if isinstance(t, list) and len(t) == 2:
+                            if t[0] == tier:
+                                tier_mentioned = True
+                            if isinstance(t[1], list):
+                                for c in t[1]:
+                                    if isinstance(c, list) and len(c) == 2 and isinstance(c[1], (int, float)):
+                                        by_tier[t[0]] = c[1]
+                    if tier in by_tier:
+                        cost = by_tier[tier]
+                    elif tier_mentioned:
+                        continue
+                    elif by_tier:
                         cost = next(iter(by_tier.values()))
                 duration = variant[16] if len(variant) > 16 else None
+                if (
+                    cost == 0
+                    and duration is None
+                    and len(variant) > 25
+                    and isinstance(variant[25], list)
+                    and variant[25]
+                ):
+                    res_code = (
+                        variant[23][0][0]
+                        if len(variant) > 23
+                        and isinstance(variant[23], list)
+                        and variant[23]
+                        and variant[23][0]
+                        else 1
+                    )
+                    for row in variant[25][0]:
+                        if (
+                            isinstance(row, list)
+                            and len(row) == 2
+                            and row[0] == [tier, 10, res_code]
+                            and isinstance(row[1], list)
+                            and len(row[1]) == 2
+                        ):
+                            cost = row[1][1]
+                            duration = 10
+                            break
                 feats = []
                 lk = str(key).lower()
                 if "_t2v" in lk or "t2v" in lk:
@@ -287,6 +321,12 @@ class FlowRPC:
                     feats.append("START_IMAGE")
                 if "_r2v" in lk or "r2v" in lk:
                     feats.append("REFERENCES")
+                if "_edit" in lk:
+                    feats.append("EDIT")
+                if "extend" in lk or "extension" in lk:
+                    feats.append("EXTEND")
+                if "upsampl" in lk:
+                    feats.append("UPSCALE")
                 models.append(
                     {
                         "key": key,
@@ -328,6 +368,7 @@ class FlowRPC:
                     "project_id": w[4] if len(w) > 4 else project_id,
                 }
             )
+        wf_names = {w["id"]: w["display_name"] for w in workflows}
         media_section = data[2] if len(data) > 2 and isinstance(data[2], list) else []
         for group in media_section:
             if not isinstance(group, list) or len(group) < 3:
@@ -338,10 +379,11 @@ class FlowRPC:
             model_key = models[0] if models else ""
             duration = _find_duration(group)
             is_video = (
-                any(t in model_key for t in ("_t2v", "_i2v", "_r2v", "_fl_", "veo_"))
+                any(t in model_key for t in ("_t2v", "_i2v", "_r2v", "_fl_", "_edit", "veo_"))
                 or duration is not None
             )
             signed = re.findall(r"https://flow-content\.google/video/[^\"\\]+", text)
+            wf_id = group[2] if isinstance(group[2], str) else ""
             medias.append(
                 {
                     "media_id": group[0],
@@ -350,7 +392,8 @@ class FlowRPC:
                     "poster_url": posters[0] if posters else "",
                     "model_key": model_key,
                     "duration_s": duration,
-                    "workflow_id": group[2] if isinstance(group[2], str) else "",
+                    "workflow_id": wf_id,
+                    "display_name": wf_names.get(wf_id, ""),
                 }
             )
         return {"workflows": workflows, "medias": medias}

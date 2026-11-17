@@ -11,7 +11,8 @@ from flow._models import (
     ParsedPrompt,
     parse_prompt_file,
 )
-from flow._client import _safe_filename
+from flow._client import _safe_filename, _make_cost_verifier
+from flow._flow_ui import AgentUI
 
 
 def test_parse_prompt_file_plain(tmp_path: Path):
@@ -111,3 +112,28 @@ def test_batch_result_add():
     assert batch.skipped == 1
 
     assert len(batch.results) == 3
+
+
+def test_parse_card_and_cost_verifier():
+    """Confirmation card parser and strict HTrJv price verifier."""
+    cfg = {
+        "videoModels": [
+            {"displayName": "Omni 1.2 Flash", "durationS": 3, "creditCost": 3},
+            {"displayName": "Omni 1.2 Flash", "durationS": 10, "creditCost": 10},
+            {"displayName": "Omni 1.2 Flash", "durationS": 10, "creditCost": 30},
+            {"displayName": "Veo 3.1 - Lite", "durationS": 4, "creditCost": 5},
+        ]
+    }
+    c1 = AgentUI.parse_card("我将使用 Omni 1.2 Flash 生成 3 秒视频。\n要消耗 3 个点数，开始生成这 1 个视频吗？")
+    assert c1["cost"] == 3 and c1["duration_s"] == 3
+    v = _make_cost_verifier(cfg)
+    assert v(c1) is True
+    assert v({"cost": 99, "duration_s": 3, "raw": "Omni 1.2 Flash"}) is False
+    assert v({"cost": 0, "duration_s": None, "raw": "Omni 1.2 Flash"}) is False
+
+    # Edit card without duration on card uses expected_duration_s from source video
+    c_edit = AgentUI.parse_card("我将对该视频进行镜头编辑。\n要消耗 10 个点数，开始生成这 1 个视频吗？")
+    v_edit = _make_cost_verifier(cfg, expected_duration_s=10, default_family="Omni 1.2 Flash")
+    assert v_edit(c_edit) is True
+    assert _make_cost_verifier(cfg, expected_duration_s=3, default_family="Omni 1.2 Flash")(c_edit) is False
+

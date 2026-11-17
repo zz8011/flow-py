@@ -41,11 +41,15 @@
 - 图片：`flow image "清晨的海边灯塔，电影感"` → agent 按其设置出 2 张并下载，积分不变（0 扣）。
 - 手动试生成的第一条（gen9，修补前）成品在 `trial-beach.mp4`。
 
-## 已知限制 / 未移植
+## 已知限制 / 二期移植进展（2026-11-18 更新，详见 `PORT2.md`）
 
-- 模型、画幅、时长由**项目内 agent 的已存设置**决定（默认 16:9 / Omni 1.2 Flash / 10s），CLI 的 --model / --aspect 目前仅是签名兼容的提示参数，不会去改 agent 设置；要换模型先在网页里改项目 agent 设置。
-- I2V（--start）、多参考图、extend / 续写、camera、insert / remove、upscale 未移植到 agent 面板（_api 直连路已死、_client 显式报错）。
-- generate_image 的出图数量由 agent 设置决定（当前 ×2），--count 不精确。
+- **已全部移植并实测跑通**：
+  - `generate_video(..., start_image=..., reference_images=...)`（`flow video --start` / `flow frames`）：支持挂载项目内已有图片 UUID 或直接上传本地图片作为首帧/多参考图生成视频。
+  - `--model` 与 `--aspect`（`flow video` / `flow image`）：通过智能体指令精确指定模型家族（`Veo 3.1 - Lite`、`Veo 3.1 - Fast`、`Veo 3.1 - Quality`、`Omni 1.2 Flash`、`Omni 1.1 Flash`）与画幅（`16:9 横屏` / `9:16 竖屏` / `1:1 方形`），已实测产出对应分辨率。
+  - `extend_video` / `extend_loop`（`flow extend` / `flow extend-loop`）：挂载源视频 chip 交由 `Omni 1.2 Flash` 延续镜头。
+  - `camera_motion` / `camera_position`（`flow camera` / `flow camera-pos`）：挂载源视频 chip 交由 `Omni 1.2 Flash` 重新运镜或调整机位。
+  - `insert_object` / `remove_object`（`flow insert` / `flow remove`）：挂载源视频 chip 交由 `Omni 1.2 Flash` 插入或移除物体（注：原版 `labs.google` 编辑页的画布涂抹像素蒙版及 `veo_2_0_object_removal` 在新站已下线，现由 `Omni 1.2 Flash` 按文本描述或 `(x, y)` 方位描述执行移除）。
+  - `upscale_video`（`flow upscale`）：通过编辑页 `/project/<id>/edit/<wid>` 下载菜单触发 `1080p 已高清重塑`（0 积分免费）或 `4K`（50 积分），并通过 `as29s` 轮询 `<media_id>_upsampled` 现签下载。
 - `flow login` 仍需有头浏览器（Xvfb 或桌面）由用户本人完成登录，补丁只修了登录检出逻辑。
 - 签名 URL 有时效（Expires），download / poll 每次现签、不要缓存。
 

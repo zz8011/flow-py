@@ -81,7 +81,11 @@ class BrowserManager:
     # ------------------------------------------------------------------
 
     async def start(self) -> "BrowserManager":
+        import os
         ensure_dirs()
+        home_pw = Path.home() / ".cache" / "ms-playwright"
+        if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ and home_pw.is_dir():
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(home_pw)
         self._pw = await async_playwright().start()
 
         if self.cdp_url:
