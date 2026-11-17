@@ -61,7 +61,7 @@ from ._exceptions import (
 log = logging.getLogger(__name__)
 
 # ── Base URLs ────────────────────────────────────────────────────────────────
-FLOW_BASE = "https://labs.google/fx"
+FLOW_BASE = "https://flow.google.com"
 API_BASE  = "https://aisandbox-pa.googleapis.com/v1"
 
 # reCAPTCHA Enterprise site key (from page source)
@@ -373,12 +373,20 @@ class FlowAPI:
         self._user_tier       = user_tier
         self._poll_interval   = poll_interval_s
         self._timeout_s       = default_timeout_s
+        self._rpc = None  # FlowRPC, lazily built (new flow.google.com backend)
         self._project_page_url = (
-            f"{FLOW_BASE}/tools/flow/project/{project_id}" if project_id else ""
+            f"{FLOW_BASE}/project/{project_id}" if project_id else ""
         )
         # Bearer token cache (CDP mode only)
         self._bearer_token:    str   = ""
         self._bearer_token_ts: float = 0.0
+
+    def _rpc_client(self):
+        """Lazily build the batchexecute RPC client (flow.google.com)."""
+        if self._rpc is None:
+            from ._rpc import FlowRPC
+            self._rpc = FlowRPC(self._bm)
+        return self._rpc
 
     # ── Auth ─────────────────────────────────────────────────────────────────
 
@@ -491,7 +499,7 @@ class FlowAPI:
         page = await self._bm.page()
 
         # ── Ensure we're on a labs.google page (needed for NEXT_DATA + auth session) ──
-        proj_url = f"{FLOW_BASE}/tools/flow/project/{self.project_id}"
+        proj_url = f"{FLOW_BASE}/project/{self.project_id}"
         if "labs.google" not in page.url:
             log.info("Navigating to Flow project page for Bearer token extraction")
             await page.goto(proj_url, wait_until="domcontentloaded", timeout=20000)
@@ -637,8 +645,9 @@ class FlowAPI:
     # ── Credits ───────────────────────────────────────────────────────────────
 
     async def get_credits(self) -> "Credits":
-        data = await self._fetch("GET", f"{API_BASE}/credits")
-        return Credits(data)
+        # Patched: the aisandbox-pa REST API is gone; credits now come from
+        # the flow.google.com batchexecute RPC `nzlxg`.
+        return Credits(await self._rpc_client().get_credits())
 
     async def get_video_model_config(self) -> dict:
         """
@@ -656,7 +665,9 @@ class FlowAPI:
             result.videoModels[].modelStatus → "MODEL_STATUS_DEPRECATED" for old models
         """
         # _trpc_get already unwraps result.data.json, giving {"result": {"videoModels": [...]}}
-        return await self._trpc_get("videoFx.getVideoModelConfig", {})
+        # Patched: decoded from the batchexecute RPC `HTrJv` model table.
+        cfg = await self._rpc_client().get_model_config()
+        return {"result": cfg}
 
     async def get_flow_app_config(self) -> dict:
         """
@@ -672,21 +683,46 @@ class FlowAPI:
 
         Returns dict with top-level keys like isFlowUpsamplingEnabled, siteContent, etc.
         """
-        data = await self._trpc_get("videoFx.getFlowAppConfig", {})
-        # _trpc_get gives {"result": {...flags...}} — unwrap one level for convenience
-        return data.get("result", data)
+        # Patched: no batchexecute equivalent identified yet; return empty.
+        log.debug("get_flow_app_config: not available on flow.google.com backend")
+        return {}
 
     async def get_user_settings(self) -> dict:
         """Fetch user settings (lastAcknowledgedChangeLogId, isEditHistoryVisible, etc.)."""
-        data = await self._trpc_get("videoFx.getUserSettings", None)
-        return data.get("result", data)
+        # Patched: no batchexecute equivalent identified yet; return empty.
+        return {}
 
     # ── Project data ──────────────────────────────────────────────────────────
 
     async def get_project_data(self) -> dict:
-        return await self._trpc_get(
-            "flow.projectInitialData", {"projectId": self.project_id}
-        )
+        # Patched: workflows + media come from the batchexecute RPC `Zzl0ze`,
+        # reshaped into the legacy projectContents.workflows structure.
+        pm = await self._rpc_client().list_project_media(self.project_id)
+        media_by_wf: dict = {}
+        for m in pm["medias"]:
+            media_by_wf.setdefault(m.get("workflow_id", ""), []).append(m)
+        workflows = []
+        for w in pm["workflows"]:
+            medias = media_by_wf.get(w["id"], [])
+            workflows.append({
+                "name": w["id"],
+                "metadata": {
+                    "displayName": w["display_name"],
+                    "primaryMediaId": medias[0]["media_id"] if medias else "",
+                },
+                "projectId": self.project_id,
+                "medias": [
+                    {
+                        "name": m["media_id"],
+                        "mediaMetadata": {"mediaStatus": {
+                            "mediaGenerationStatus": "MEDIA_GENERATION_STATUS_SUCCESSFUL"}},
+                        "video": {"generatedVideo": {"fifeUrl": m["signed_url"]}},
+                        "image": {"generatedImage": {"fifeUrl": m["poster_url"]}},
+                    }
+                    for m in medias
+                ],
+            })
+        return {"projectContents": {"workflows": workflows}}
 
     async def list_workflows(self) -> list[Workflow]:
         data = await self.get_project_data()
@@ -735,6 +771,11 @@ class FlowAPI:
         Returns:
             List of GeneratedImage objects with fife_url populated.
         """
+        # Patched: direct image API retired — see FlowClient.generate_image().
+        raise GenerationError(
+            "Direct API image generation is unavailable on flow.google.com; "
+            "use FlowClient.generate_image() (agent UI path)."
+        )
         cc   = await self._client_context()
         seed = seed if seed is not None else random.randint(0, 2**31)
 
@@ -783,6 +824,14 @@ class FlowAPI:
 
     async def _video_call(self, endpoint: str, requests: list) -> VideoJob:
         """Submit one async video request list to *endpoint* and return a VideoJob."""
+        # Patched: the aisandbox-pa direct-generation API was retired with
+        # the old labs.google app (403s even in the author's own notes).
+        # Generation on flow.google.com goes through the in-page creation
+        # agent — use FlowClient.generate_video() instead.
+        raise GenerationError(
+            "Direct API generation is unavailable on flow.google.com; "
+            "use FlowClient.generate_video() (agent UI path)."
+        )
         cc   = await self._client_context()
         body = {
             "mediaGenerationContext": {"batchId": str(uuid.uuid4())},
@@ -1146,13 +1195,33 @@ class FlowAPI:
 
         Endpoint: POST /v1/video:batchCheckAsyncVideoGenerationStatus
         """
-        pid  = project_id or self.project_id
-        data = await self._fetch(
-            "POST",
-            "video:batchCheckAsyncVideoGenerationStatus",
-            {"media": [{"name": media_name, "projectId": pid}]},
-        )
-        return VideoStatus(data)
+        # Patched: agent-mode generations surface in the project's media
+        # list once complete; absence means still generating.
+        pid = project_id or self.project_id
+        pm = await self._rpc_client().list_project_media(pid)
+        for m in pm["medias"]:
+            if m["media_id"] == media_name:
+                url = m["signed_url"]
+                if not url:
+                    # The listing carries no signed URLs; resolve per media.
+                    url = await self._rpc_client().get_media_url(media_name)
+                url = url or m["poster_url"]
+                return VideoStatus({
+                    "media": [{
+                        "name": media_name,
+                        "mediaMetadata": {"mediaStatus": {
+                            "mediaGenerationStatus": "MEDIA_GENERATION_STATUS_SUCCESSFUL"}},
+                        "video": {"generatedVideo": {"fifeUrl": url}},
+                        "image": {"generatedImage": {"fifeUrl": url}},
+                    }],
+                })
+        return VideoStatus({
+            "media": [{
+                "name": media_name,
+                "mediaMetadata": {"mediaStatus": {
+                    "mediaGenerationStatus": "MEDIA_GENERATION_STATUS_PENDING"}},
+            }],
+        })
 
     async def wait_for_video(
         self,

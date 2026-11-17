@@ -93,7 +93,7 @@ class FlowClient:
         self.project_id = project_id
         self.workflow_id = workflow_id
         self._ui        = FlowUI()
-        self._project_url = f"https://labs.google/fx/tools/flow/project/{project_id}"
+        self._project_url = f"https://flow.google.com/project/{project_id}"
 
     # ── Factory ────────────────────────────────────────────────────────────────
 
@@ -131,8 +131,8 @@ class FlowClient:
 
         # Navigate to project page to load session + reCAPTCHA
         page = await bm.page()
-        if "labs.google" not in page.url:
-            proj_url = f"https://labs.google/fx/tools/flow/project/{pid}"
+        if "flow.google.com" not in page.url:
+            proj_url = f"https://flow.google.com/project/{pid}"
             await page.goto(proj_url, wait_until="domcontentloaded", timeout=20_000)
             await asyncio.sleep(2)
 
@@ -165,64 +165,108 @@ class FlowClient:
         timeout_s: int = 120,
     ) -> list[VideoJob]:
         """
-        Generate video(s) from a text prompt (T2V or I2V).
+        Generate video(s) via the flow.google.com creation agent.
 
-        The UI workflow:
-          1. Navigate to project page
-          2. (Optionally) upload start_image for I2V mode
-          3. Open settings: set Video mode, aspect ratio, count
-          4. Fill prompt
-          5. Click Create → captures batchAsyncGenerateVideoText response
+        Patched implementation: the old labs.google UI + aisandbox
+        interceptor path is gone. The project page's agent panel is
+        driven instead (see flow._flow_ui.AgentUI):
 
-        Args:
-            prompt:     Generation prompt text
-            model:      Display name of the video model (used in dropdown)
-            aspect:     "landscape" or "portrait"
-            count:      Number of videos to generate (1-4)
-            start_image: Local path to an image for I2V (Image-to-Video) mode
-            timeout_s:  Seconds to wait for the API call
+          * the prompt is sent as an explicit video request — a bare
+            prompt would make the agent generate images instead;
+          * the agent's confirmation card quotes model + duration +
+            credit cost; the quote is verified against the official
+            model-config price and the card is approved only on an
+            exact match;
+          * completion is detected via the RPC media list, and the
+            returned VideoJob is already COMPLETE with fife_url set
+            (submission and completion are fused in agent mode).
 
-        Returns:
-            List of VideoJob objects (PENDING status, use wait_for_video to poll)
+        The agent uses the project's saved agent settings (aspect,
+        model, duration); ``model``/``aspect`` are kept for signature
+        compatibility and are advisory only. ``start_image`` (I2V) is
+        not supported by the agent path yet.
         """
-        page = await self._bm.page()
-        await self._ensure_project_page(page)
-
-        interceptor = UIInterceptor()
-        interceptor.attach(page)
-
-        # Configure settings
-        await self._ui.open_settings_panel(page)
-        mode = GenerationMode.FRAME_TO_VIDEO if start_image else GenerationMode.VIDEO
-        await self._ui.switch_mode(page, mode)
-        ratio = AspectRatio.PORTRAIT if aspect == "portrait" else AspectRatio.LANDSCAPE
-        await self._ui.set_aspect_ratio(page, ratio)
-        await self._ui.set_count(page, count)
-        await self._ui.fill_prompt(page, prompt)
-
         if start_image:
-            await self._ui.upload_image(page, start_image)
+            raise GenerationError(
+                "start_image (I2V) is not supported by the agent UI path yet"
+            )
+        from ._flow_ui import AgentUI
 
-        # Click submit → triggers real reCAPTCHA token generation
-        await self._ui.click_submit(page)
+        rpc = self._api._rpc_client()
+        agent = AgentUI(self._bm, self.project_id)
+        page = await self._bm.page()
 
-        # Wait for API response
-        entry = await interceptor.wait_for(
-            "batchAsyncGenerateVideoText", timeout=timeout_s, require_success=True
-        )
+        cfg = await rpc.get_model_config()
 
-        jobs = []
-        for job_data in entry.resp.get("jobs", []):
-            media_id = job_data.get("mediaId", {})
-            media_name = media_id.get("mediaName") or media_id.get("name", "")
+        def verify(parsed: dict) -> bool:
+            # The quote on the card is exactly what gets charged (verified
+            # live), so the invariant is: the quoted cost must be an
+            # official price for the model family named on the card —
+            # and when the card states a duration, it must be the
+            # official price for that exact duration.
+            cost, dur = parsed.get("cost"), parsed.get("duration_s")
+            if cost is None:
+                return False
+            raw = parsed.get("raw", "")
+            family = [
+                m for m in cfg.get("videoModels", [])
+                if m.get("displayName") and m["displayName"] in raw
+            ]
+            if not family:
+                return False
+            if dur is not None:
+                return any(
+                    m.get("durationS") == dur and m.get("creditCost") == cost
+                    for m in family
+                )
+            return any(m.get("creditCost") == cost for m in family)
+
+        text = prompt
+        if not any(k in prompt for k in ("视频",)) and "video" not in prompt.lower():
+            text = "生成一段视频：" + prompt
+
+        jobs: list[VideoJob] = []
+        await agent.open_session(page)
+        for _ in range(max(1, count)):
+            before = {
+                m["media_id"]
+                for m in (await rpc.list_project_media(self.project_id))["medias"]
+            }
+            await agent.run_turn(page, text, verify_cost=verify)
+            media = await self._wait_new_media(rpc, before, kind="video",
+                                               timeout_s=600)
+            if media is None:
+                raise GenerationError(
+                    "Agent approved the generation but no video appeared "
+                    "in the project media list within the timeout"
+                )
             job = VideoJob.__new__(VideoJob)
-            job.media_name = media_name
-            job.status = "PENDING"
+            job.media_name = media["media_id"]
+            job.status = "COMPLETE"
             job.project_id = self.project_id
+            job.workflow_id = media.get("workflow_id", "")
+            job.fife_url = media["signed_url"] or await rpc.get_media_url(
+                media["media_id"]
+            )
+            job.operation_name = ""
+            job.remaining_credits = 0
+            job.file_path = None
+            job.elapsed_s = 0.0
             jobs.append(job)
-
-        log.info("T2V submitted: %d job(s)", len(jobs))
+        log.info("Agent T2V complete: %d job(s)", len(jobs))
         return jobs
+
+    async def _wait_new_media(self, rpc, before_ids: set, *, kind: str,
+                              timeout_s: int = 600):
+        """Poll the RPC media list until a new media of *kind* appears."""
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while asyncio.get_event_loop().time() < deadline:
+            pm = await rpc.list_project_media(self.project_id)
+            for m in pm["medias"]:
+                if m["media_id"] not in before_ids and m["kind"] == kind:
+                    return m
+            await asyncio.sleep(10)
+        return None
 
     async def generate_image(
         self,
@@ -234,49 +278,65 @@ class FlowClient:
         timeout_s: int = 120,
     ) -> list[GeneratedImage]:
         """
-        Generate images from a text prompt (T2I).
+        Generate images via the flow.google.com creation agent.
 
-        Returns list of GeneratedImage with fife_url for display/download.
-        Image generation is synchronous (waits 45-60s for server to generate).
-
-        Uses the same UI as video generation but with Image mode selected.
-        Endpoint: batchGenerateImages (returns immediately with image data).
-        
-        Note: Settings panel can be unreliable. If switch_mode fails, manually
-        click an image thumbnail first to enter image edit mode, then call this.
+        Patched implementation: a bare prompt makes the agent generate
+        images with the project's saved image settings (default Nano
+        Banana 2.1 x2 on this account — the number returned is whatever
+        the agent produced). Image generation is free on the current
+        tier; if a confirmation card ever quotes a cost above 0 the
+        turn is aborted instead of approved.
         """
+        if reference_images:
+            raise GenerationError(
+                "reference_images are not supported by the agent UI path yet"
+            )
+        from ._flow_ui import AgentUI
+
+        rpc = self._api._rpc_client()
+        agent = AgentUI(self._bm, self.project_id)
         page = await self._bm.page()
-        await self._ensure_project_page(page)
 
-        interceptor = UIInterceptor()
-        interceptor.attach(page)
+        def verify_free(parsed: dict) -> bool:
+            return parsed.get("cost") == 0
 
-        await self._ui.open_settings_panel(page)
-        await self._ui.switch_mode(page, GenerationMode.IMAGE)
-        ratio = (AspectRatio.PORTRAIT if "port" in aspect else
-                 AspectRatio.SQUARE   if "square" in aspect else
-                 AspectRatio.LANDSCAPE)
-        await self._ui.set_aspect_ratio(page, ratio)
-        await self._ui.set_count(page, count)
-        await self._ui.fill_prompt(page, prompt)
-        await self._ui.click_submit(page)
-
-        entry = await interceptor.wait_for(
-            "batchGenerateImages", timeout=timeout_s, require_success=True
-        )
-
-        images = []
-        for item in entry.resp.get("media", []):
-            gen = item.get("image", {}).get("generatedImage", {})
-            img = GeneratedImage.__new__(GeneratedImage)
-            img.fife_url   = gen.get("fifeUrl", "")
-            img.media_name = item.get("name", "")
-            img.prompt     = gen.get("prompt", prompt)
-            img.seed       = gen.get("seed")
-            img.dimensions = item.get("dimensions", {})
-            images.append(img)
-
-        log.info("T2I complete: %d image(s)", len(images))
+        before = {
+            m["media_id"]
+            for m in (await rpc.list_project_media(self.project_id))["medias"]
+        }
+        await agent.open_session(page)
+        await agent.run_turn(page, prompt, card_timeout_s=60,
+                             verify_cost=verify_free)
+        images: list[GeneratedImage] = []
+        deadline = asyncio.get_event_loop().time() + max(timeout_s, 300)
+        while asyncio.get_event_loop().time() < deadline:
+            pm = await rpc.list_project_media(self.project_id)
+            new = [m for m in pm["medias"]
+                   if m["media_id"] not in before and m["kind"] == "image"]
+            if new:
+                for m in new:
+                    img = GeneratedImage.__new__(GeneratedImage)
+                    img._raw = {}
+                    img.media_name = m["media_id"]
+                    img.project_id = self.project_id
+                    img.workflow_id = m.get("workflow_id", "")
+                    img.fife_url = await rpc.get_media_url(
+                        m["media_id"]
+                    ) or m["poster_url"]
+                    img.seed = 0
+                    img.model = m.get("model_key", "")
+                    img.file_path = None
+                    img.prompt = prompt
+                    img.dimensions = {}
+                    images.append(img)
+                break
+            await asyncio.sleep(8)
+        if not images:
+            raise GenerationError(
+                "Agent finished the turn but no image appeared in the "
+                "project media list within the timeout"
+            )
+        log.info("Agent T2I complete: %d image(s)", len(images))
         return images
 
     # ── Edit-page operations ──────────────────────────────────────────────────
@@ -299,6 +359,9 @@ class FlowClient:
         Model: veo_3_1_extend_fast_landscape
         Cost: same as T2V (uses credits)
         """
+        raise GenerationError(
+            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        )
         wid = workflow_id or self.workflow_id or ""
         page = await self._bm.page()
         await self._ui.navigate_to_edit(page, self.project_id, wid)
@@ -354,6 +417,9 @@ class FlowClient:
         Returns:
             List of VideoJob (all PENDING if wait=False, all complete if wait=True)
         """
+        raise GenerationError(
+            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        )
         jobs: list[VideoJob] = []
         current_id = media_id
         out = Path(output_dir) if output_dir else None
@@ -399,6 +465,9 @@ class FlowClient:
         Uses endpoint: batchAsyncGenerateVideoReshootVideo
         Model: veo_3_0_reshoot_landscape
         """
+        raise GenerationError(
+            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        )
         motion_label = CAMERA_MOTIONS.get(motion.lower(), motion)
         wid = workflow_id or self.workflow_id or ""
         page = await self._bm.page()
@@ -439,6 +508,9 @@ class FlowClient:
 
         Uses the same ReshootVideo endpoint with STATIONARY_* motion types.
         """
+        raise GenerationError(
+            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        )
         pos_label = CAMERA_POSITIONS.get(position.lower(), position.title())
         wid = workflow_id or self.workflow_id or ""
         page = await self._bm.page()
@@ -477,6 +549,9 @@ class FlowClient:
         Uses endpoint: batchAsyncGenerateVideoObjectInsertion
         Model: veo_2_0_object_insertion_landscape
         """
+        raise GenerationError(
+            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        )
         wid = workflow_id or self.workflow_id or ""
         page = await self._bm.page()
         await self._ui.navigate_to_edit(page, self.project_id, wid)
@@ -525,6 +600,9 @@ class FlowClient:
         Uses endpoint: batchAsyncGenerateVideoObjectRemoval
         Model: veo_2_0_object_removal_landscape
         """
+        raise GenerationError(
+            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        )
         wid = workflow_id or self.workflow_id or ""
         page = await self._bm.page()
         await self._ui.navigate_to_edit(page, self.project_id, wid)
@@ -568,6 +646,9 @@ class FlowClient:
         Model: veo_3_1_upsampler_1080p
         Cost: 0 credits (FREE!)
         """
+        raise GenerationError(
+            "This edit operation has not been ported to the flow.google.com agent UI yet"
+        )
         wid = workflow_id or self.workflow_id or ""
         page = await self._bm.page()
         await self._ui.navigate_to_edit(page, self.project_id, wid)

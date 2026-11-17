@@ -133,19 +133,28 @@ def login():
         click.echo("🌐 Opening browser — sign in to Google, then come back...")
         await page.goto(FLOW_BASE, wait_until="domcontentloaded")
 
-        # Wait for labs.google to be loaded and authenticated
-        while True:
-            url = page.url
-            if "labs.google" in url:
-                # Check if logged in
-                logged_in = await page.evaluate("""
-                    () => window.__NEXT_DATA__?.props?.pageProps?.session?.user?.email || null
-                """)
-                if logged_in:
-                    click.echo(f"✅ Logged in as: {logged_in}")
-                    break
+        # Patched for flow.google.com: the old check scraped
+        # __NEXT_DATA__ on labs.google, which no longer exists. The new
+        # app exposes WIZ_global_data once the session is established;
+        # every evaluate is guarded because the page context is
+        # destroyed on each navigation during sign-in.
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline:
+            try:
+                url = page.url
+                if "flow.google.com" in url:
+                    ok = await page.evaluate(
+                        "() => !!(window.WIZ_global_data || {}).SNlM0e"
+                    )
+                    if ok:
+                        click.echo("✅ Logged in (flow.google.com session detected)")
+                        break
+            except Exception:
+                pass
             await asyncio.sleep(2)
             click.echo("  (waiting for login...)", err=True)
+        else:
+            click.echo("⚠️  Login not detected within 10 minutes.", err=True)
 
         await bm.stop()
         click.echo("🔐 Session saved. You can now use flow commands.")
@@ -173,18 +182,35 @@ def logout():
 @click.option("--project", "-p", default=None, help="Project ID")
 @click.option("--cdp", is_flag=True, help="Connect to existing Chrome CDP")
 def projects(project: Optional[str], cdp: bool):
-    """List saved projects and their IDs."""
-    from .._storage import load_projects
-    projs = load_projects()
-    pid, _ = get_active_project()
-    if not projs:
-        click.echo("No saved projects. Use `flow use <project_id>` to add one.")
-        return
-    click.echo(f"\n  {'':1} {'ID':38} {'Name'}")
-    click.echo("  " + "─" * 60)
-    for proj_id, info in projs.items():
-        marker = "▶" if proj_id == pid else " "
-        click.echo(f"  {marker} {proj_id:38} {info.get('name', '')}")
+    """List projects (live from flow.google.com, cached locally)."""
+    async def _go():
+        from .._rpc import FlowRPC
+        from .._storage import add_project, load_projects
+
+        live = []
+        try:
+            bm = BrowserManager(headless=True)
+            await bm.start()
+            try:
+                live = await FlowRPC(bm).list_projects()
+            finally:
+                await bm.stop()
+        except Exception as e:
+            click.echo(f"  (live project fetch failed: {e}; showing saved)", err=True)
+        for p in live:
+            add_project(p["id"], p["name"] or "project",
+                        f"https://flow.google.com/project/{p['id']}")
+        projs = load_projects()
+        pid, _ = get_active_project()
+        if not projs:
+            click.echo("No projects found. Open flow.google.com to create one.")
+            return
+        click.echo(f"\n  {'':1} {'ID':38} {'Name'}")
+        click.echo("  " + "─" * 60)
+        for proj_id, info in projs.items():
+            marker = "▶" if proj_id == pid else " "
+            click.echo(f"  {marker} {proj_id:38} {info.get('name', '')}")
+    run(_go())
 
 
 @cli.command("use")
@@ -192,7 +218,7 @@ def projects(project: Optional[str], cdp: bool):
 def use_project(project_id: str):
     """Set the active project."""
     from .._storage import add_project
-    url = f"https://labs.google/fx/tools/flow/project/{project_id}"
+    url = f"https://flow.google.com/project/{project_id}"
     set_active_project(project_id, url)
     add_project(project_id, "imported", url)
     click.echo(f"Active project: {project_id}")

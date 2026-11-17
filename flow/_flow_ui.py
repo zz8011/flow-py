@@ -692,3 +692,202 @@ class FlowUI:
         if "/project/" in url:
             return url
         return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Agent UI (flow.google.com, 2026 app) — added by the flow-py patch.
+#
+# The current Flow app has no direct generation API: the project page's
+# right-hand panel is a chat agent that plans the generation and asks for
+# approval on a confirmation card before spending credits. This driver
+# implements the flow verified live on 2026-11-18:
+#
+#   * open panel / new conversation via the edit_square button
+#   * type into the ProseMirror editor, send with the arrow_forward button
+#   * a bare prompt makes the agent generate IMAGES; a video must be
+#     requested explicitly ("生成一段视频：…")
+#   * if the turn fails ("出了点问题"), click its 重试 control once
+#   * the confirmation card quotes model + duration + credit cost; the
+#     caller verifies the quote against the official model-config price
+#     and only then approves
+#   * approval MUST be a real input click — synthetic DOM clicks are
+#     silently ignored, and cards from dead turns carry a `dimmed` class
+#
+# Completion is detected by the caller through the RPC media list
+# (flow._rpc.FlowRPC.list_project_media), not by scraping this panel.
+# ═══════════════════════════════════════════════════════════════════════════
+
+import re
+
+from ._exceptions import GenerationError
+
+_FIND_LIVE_APPROVE = """() => {
+  const els = Array.from(document.querySelectorAll('span, div, button'));
+  const hits = els.filter(e => (e.innerText || '').trim() === '批准'
+    && !(e.className || '').toString().includes('dimmed'));
+  return hits.length;
+}"""
+
+_CARD_TEXT = """() => {
+  const els = Array.from(document.querySelectorAll('span, div, button'));
+  const hits = els.filter(e => (e.innerText || '').trim() === '批准'
+    && !(e.className || '').toString().includes('dimmed'));
+  if (!hits.length) return '';
+  let e = hits[hits.length - 1];
+  let best = '';
+  let bestFull = '';
+  for (let i = 0; i < 12 && e; i++) {
+    const t = (e.innerText || '');
+    if (t.includes('点数')) {
+      if (t.length > best.length) best = t;
+      if (t.includes('秒') && t.length > bestFull.length) bestFull = t;
+    }
+    e = e.parentElement;
+  }
+  return bestFull || best;
+}"""
+
+_HAS_ERROR = "() => document.body.innerText.includes('出了点问题')"
+
+
+class AgentUI:
+    """Drive the creation-agent panel on a flow.google.com project page."""
+
+    def __init__(self, browser_manager, project_id: str):
+        self._bm = browser_manager
+        self.project_id = project_id
+        self.project_url = f"https://flow.google.com/project/{project_id}"
+
+    async def _find_box(self, page):
+        for sel in ("textarea", "[contenteditable='true']", "[role='textbox']"):
+            loc = page.locator(sel)
+            for i in range(await loc.count()):
+                el = loc.nth(i)
+                try:
+                    if await el.is_visible():
+                        return el
+                except Exception:
+                    continue
+        return None
+
+    async def open_session(self, page):
+        """Open the project page, open the agent panel, start a new chat."""
+        await page.goto(self.project_url, wait_until="domcontentloaded", timeout=30_000)
+        await asyncio.sleep(6)
+        box = await self._find_box(page)
+        if box is None:
+            comp = page.locator("button:has-text('edit_square')").first
+            if await comp.count() > 0:
+                await comp.click()
+                await asyncio.sleep(3)
+                box = await self._find_box(page)
+        if box is None:
+            raise GenerationError("Agent panel editor not found on project page")
+        # Fresh conversation (edit_square = new-session in this panel).
+        try:
+            await page.locator("button:has-text('edit_square')").last.click(timeout=5000)
+            await asyncio.sleep(3)
+        except Exception:
+            pass  # already in a fresh session
+        box = await self._find_box(page)
+        if box is None:
+            raise GenerationError("Agent editor lost after starting new session")
+        return box
+
+    async def _submit(self, page, box, text: str):
+        try:
+            await box.click(timeout=8000)
+        except Exception:
+            await box.evaluate("e => e.focus()")
+        await asyncio.sleep(0.5)
+        await page.keyboard.type(text, delay=30)
+        await asyncio.sleep(0.5)
+        await page.locator("button:has-text('arrow_forward')").last.click(timeout=15_000)
+
+    async def _click_retry_once(self, page) -> bool:
+        retry = page.get_by_text("重试", exact=True)
+        for i in range(await retry.count()):
+            el = retry.nth(i)
+            try:
+                if await el.is_visible():
+                    await el.click(timeout=8000)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _wait_card(self, page, timeout_s: float) -> Optional[str]:
+        """Wait for a live confirmation card; retry a failed turn once."""
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        retried = False
+        while asyncio.get_event_loop().time() < deadline:
+            await asyncio.sleep(5)
+            try:
+                if await page.evaluate(_FIND_LIVE_APPROVE):
+                    return await page.evaluate(_CARD_TEXT)
+                if not retried and await page.evaluate(_HAS_ERROR):
+                    if await self._click_retry_once(page):
+                        retried = True
+                        continue
+            except Exception:
+                continue
+        return None
+
+    async def _approve(self, page) -> bool:
+        """Real-input click on the live card's 批准 label (never DOM click)."""
+        loc = page.get_by_text("批准", exact=True)
+        for i in range(await loc.count()):
+            el = loc.nth(i)
+            try:
+                cls = await el.evaluate("e => (e.className || '').toString()")
+                if "dimmed" in cls:
+                    continue
+                if await el.is_visible():
+                    await el.click(timeout=8000)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def parse_card(card_text: str) -> dict:
+        """Extract {cost, duration_s, raw} from a confirmation card's text."""
+        cost = None
+        m = re.search(r"消耗\s*(\d+)\s*个点数", card_text or "")
+        if m:
+            cost = int(m.group(1))
+        dur = None
+        m = re.search(r"(\d+)\s*秒", card_text or "")
+        if m:
+            dur = int(m.group(1))
+        return {"cost": cost, "duration_s": dur, "raw": card_text or ""}
+
+    async def run_turn(self, page, text: str, *, card_timeout_s: float = 150,
+                       verify_cost=None) -> dict:
+        """Submit one agent turn and approve its confirmation card.
+
+        ``verify_cost`` is an optional callable(parsed_card) -> bool; when
+        it returns False the card is NOT approved and GenerationError is
+        raised — the tool never approves a quote it could not verify.
+        Turns that produce no card at all (e.g. free image generations)
+        return {"cost": None, "no_card": True}.
+        """
+        box = await self._find_box(page)
+        if box is None:
+            raise GenerationError("Agent editor not available for new turn")
+        await self._submit(page, box, text)
+        card_text = await self._wait_card(page, card_timeout_s)
+        if card_text is None:
+            # Distinguish "no card needed" from "agent died": if an error is
+            # showing and no retry control helped, _wait_card already tried.
+            return {"cost": None, "duration_s": None, "no_card": True, "raw": ""}
+        parsed = self.parse_card(card_text)
+        if verify_cost is not None and not verify_cost(parsed):
+            raise GenerationError(
+                "Confirmation card quote could not be verified against the "
+                f"official price — NOT approving. Card: {parsed}"
+            )
+        if not await self._approve(page):
+            raise GenerationError("Approval click failed on confirmation card")
+        parsed["no_card"] = False
+        return parsed
