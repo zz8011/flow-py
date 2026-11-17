@@ -196,7 +196,17 @@ class FlowClient:
         self.project_id = project_id
         self.workflow_id = workflow_id
         self._ui        = FlowUI()
+        self._music     = None
         self._project_url = f"https://flow.google.com/project/{project_id}"
+
+    @property
+    def music(self):
+        """Access FlowMusicClient sharing this client's browser profile."""
+        if self._music is None:
+            from ._music import FlowMusicClient
+            from ._music_rpc import FlowMusicRPC
+            self._music = FlowMusicClient(FlowMusicRPC(self._bm))
+        return self._music
 
     # ── Factory ────────────────────────────────────────────────────────────────
 
@@ -250,6 +260,8 @@ class FlowClient:
         await self.close()
 
     async def close(self):
+        if self._music is not None:
+            await self._music.close()
         await self._bm.stop()
 
     # ══════════════════════════════════════════════════════════════════════════

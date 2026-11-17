@@ -100,11 +100,19 @@ from ._models import (
     ParsedPrompt,
     parse_prompt_file,
 )
+from ._music import (
+    FlowMusicClient,
+    MusicCredits,
+    ProducerTurn,
+    SongClip,
+    StemClip,
+)
 
 __version__ = "0.1.0"
 __all__ = [
     # High-level client
     "FlowClient",
+    "FlowMusicClient",
     # Low-level API
     "FlowAPI",
     # Response types
@@ -113,6 +121,10 @@ __all__ = [
     "VideoStatus",
     "Credits",
     "Workflow",
+    "MusicCredits",
+    "SongClip",
+    "StemClip",
+    "ProducerTurn",
     # Exceptions
     "FlowError",
     "AuthError",

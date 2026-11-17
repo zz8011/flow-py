@@ -156,6 +156,14 @@ def login():
         else:
             click.echo("⚠️  Login not detected within 10 minutes.", err=True)
 
+        # Warm up Flow Music SSO token if available in the same Google session
+        try:
+            from .._music_rpc import FlowMusicRPC
+            await FlowMusicRPC(bm)._bootstrap(force_refresh=True)
+            click.echo("🎵 Flow Music session synced (flowmusic.app)")
+        except Exception:
+            pass
+
         await bm.stop()
         click.echo("🔐 Session saved. You can now use flow commands.")
 
@@ -166,7 +174,9 @@ def login():
 def logout():
     """Clear saved browser session."""
     from .._storage import PROFILE_DIR
+    from .._music_rpc import clear_cached_music_token
     import shutil
+    clear_cached_music_token()
     if PROFILE_DIR.exists():
         shutil.rmtree(PROFILE_DIR)
         click.echo("✅ Session cleared.")
@@ -1061,6 +1071,9 @@ def download_all(workflow, output, project, cdp):
 # ══════════════════════════════════════════════════════════════════════════════
 # ENTRY POINT
 # ══════════════════════════════════════════════════════════════════════════════
+
+from ._music import music_cli  # noqa: E402
+cli.add_command(music_cli)
 
 if __name__ == "__main__":
     cli()
