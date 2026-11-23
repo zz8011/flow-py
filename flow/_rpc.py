@@ -154,7 +154,6 @@ class FlowRPC:
     async def call(self, rpcid: str, payload: Any) -> Any:
         """Invoke one RPC and return its decoded payload (or None)."""
         wiz = await self._bootstrap()
-        page = await self._bm.page()
         self._reqid += 17
         query = urlencode(
             {

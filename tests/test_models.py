@@ -1,14 +1,11 @@
 """Tests for flow._models."""
 from pathlib import Path
 
-import pytest
-
 from flow._models import (
     BatchResult,
     GenerationMode,
     GenerationResult,
     GenerationStatus,
-    ParsedPrompt,
     parse_prompt_file,
 )
 from flow._client import _safe_filename, _make_cost_verifier

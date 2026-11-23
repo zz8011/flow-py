@@ -10,7 +10,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from .._client import FlowClient
-from .._models import AspectRatio, GenerationMode, GenerationResult, GenerationStatus
+from .._models import AspectRatio, GenerationResult, GenerationStatus
 
 console = Console()
 err_console = Console(stderr=True)

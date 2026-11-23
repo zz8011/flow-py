@@ -25,19 +25,14 @@ from typing import Optional
 
 import click
 
+from .. import __version__
 from .._browser import BrowserManager
 from .._client import FlowClient, CAMERA_MOTIONS, CAMERA_POSITIONS
-from .._storage import get_active_project, load_config, save_config, set_active_project
+from .._storage import get_active_project, load_config, set_active_project
 from .._exceptions import (
     AuthError, GenerationError, GenerationTimeout,
-    InvalidArgumentError, NotFoundError,
 )
-from .._api import (
-    FlowAPI,
-    FLOW_BASE,
-    VIDEO_MODEL_VEO31_FAST, VIDEO_MODEL_VEO31_I2V,
-    IMAGE_MODEL_NARWHAL,
-)
+from .._api import FLOW_BASE
 
 # ── Shared helpers ─────────────────────────────────────────────────────────────
 
@@ -100,7 +95,7 @@ async def _make_client(
 # ── CLI root ───────────────────────────────────────────────────────────────────
 
 @click.group()
-@click.version_option()
+@click.version_option(version=__version__)
 @click.option("--debug",   is_flag=True, help="Enable debug logging")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output (extra detail)")
 @click.option("--quiet",   "-q", is_flag=True, help="Suppress progress, print only results")
@@ -272,7 +267,7 @@ def config():
     click.echo(f"Timeout:        {cfg.generation_timeout_s}s")
     click.echo(f"Headless:       {cfg.headless}")
     click.echo(f"Output dir:     {cfg.default_output_dir}")
-    click.echo(f"Profile dir:    ~/.flow-py/browser-profile")
+    click.echo("Profile dir:    ~/.flow-py/browser-profile")
 
 
 @cli.command()
@@ -289,12 +284,9 @@ def status(project: Optional[str], cdp: bool, as_json: bool):
         flow status --json
     """
     async def _go():
-        from .._storage import load_projects
-
         pid, url = get_active_project()
         pid = project or pid or ""
         cfg = load_config()
-        projects = load_projects()
 
         info: dict = {
             "auth": "unknown",
@@ -360,7 +352,7 @@ def status(project: Optional[str], cdp: bool, as_json: bool):
         # Human-friendly display
         auth_icon = "✅" if info["auth"] == "authenticated" else "❌"
         click.echo(f"\n{'─'*50}")
-        click.echo(f"  🎬 flow-py Status")
+        click.echo("  🎬 flow-py Status")
         click.echo(f"{'─'*50}")
         click.echo(f"  Auth:        {auth_icon} {info['auth']}")
         click.echo(f"  Project:     {pid[:8]}...{pid[-4:] if len(pid)>12 else pid}")
@@ -979,7 +971,7 @@ def batch_videos(prompts_file, output, aspect, model, concurrency, project, head
             try:
                 click.echo(f"  [{i+1}] {prompt[:50]}")
                 jobs = await c.generate_video(prompt, model=model, aspect=aspect)
-                for j, job in enumerate(jobs):
+                for job in jobs:
                     status = await c.wait_for_video(job, on_poll=_poll_cb)
                     if status.fife_url:
                         p = out / f"video_{i+1:03d}.mp4"

@@ -1,5 +1,4 @@
 """Tests for flow._storage."""
-import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,7 +10,6 @@ from flow._storage import (
     load_config,
     load_projects,
     save_config,
-    save_projects,
     set_active_project,
 )
 
