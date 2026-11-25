@@ -93,17 +93,24 @@ def matches_any_label(text: str, labels: Sequence[str], *, exact: bool = True) -
 
 
 def parse_credit_cost(text: str) -> Optional[int]:
-    """Extract a quoted credit cost from Chinese or English UI text."""
+    """Extract the quoted credit cost — the points that will be charged — from CN/EN UI text."""
     if not text:
         return None
     m = re.search(r"消耗\s*(\d+)\s*个?点数", text)
     if m:
         return int(m.group(1))
-    m = re.search(
-        r"\b(?:use|uses|using|spend|spends|spending|cost|costs|costing|for|requires?)\s+(\d+)\s*credits?\b",
-        text,
-        re.I,
-    )
+    # A balance is not a quote: drop "Balance[:]? N credits" first, otherwise
+    # "Balance: 0 credits. 50 credits will be charged" would parse as 0.
+    text = re.sub(r"\bbalance\b\s*:?\s*\d[\d,]*\s*credits?\b", " ", text, flags=re.I)
+    # "50 credits will be charged" is the most explicit form, so it wins over verb forms
+    m = re.search(r"\b(\d+)\s*credits?\s+will\s+be\s+charged\b", text, re.I)
+    if not m:
+        m = re.search(
+            r"\b(?:use|uses|using|spend|spends|spending|cost|costs|costing|for|requires?)"
+            r"\s*:?\s+(\d+)\s*credits?\b",
+            text,
+            re.I,
+        )
     if m:
         return int(m.group(1))
     m = re.search(r"\b(\d+)\s*credits?\b", text, re.I)
@@ -119,6 +126,8 @@ def has_nonzero_credit_quote(text: str) -> bool:
     cost = parse_credit_cost(text)
     if cost is not None:
         return cost > 0
+    if re.search(r"no credits? (?:will be )?charged|免费|\bfree\b", text, re.I):
+        return False  # an explicit free phrase is not an "unparseable quote"
     return "消耗" in text or bool(re.search(r"\bcredits?\b", text, re.I))
 
 

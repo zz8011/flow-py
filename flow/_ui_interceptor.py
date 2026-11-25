@@ -53,7 +53,7 @@ class UIInterceptor:
         interceptor = UIInterceptor()
         interceptor.attach(page)          # BEFORE clicking
 
-        await flow_ui.click_extend(page)  # triggers real reCAPTCHA
+        await agent.run_turn(page, text)  # real input click via flow._flow_ui.AgentUI
 
         entry = await interceptor.wait_for("batchAsyncGenerateVideoExtendVideo")
         media_name = entry.resp["jobs"][0]["mediaId"]["mediaName"]

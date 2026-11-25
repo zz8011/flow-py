@@ -1,6 +1,7 @@
 """Offline CLI & public export compatibility tests."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -84,6 +85,34 @@ def test_public_exports_complete_and_deduplicated():
     assert len(mask) > 0
     assert isinstance(flow.encode_mask_b64(mask), str)
     assert "veo_3_1_t2v_fast" in flow.MODEL_REGISTRY
+
+
+def test_flowapi_retired_methods_point_to_flowclient():
+    """Retired v0.1.0 direct-generation calls must raise a GenerationError pointing at
+    FlowClient instead of a bare AttributeError."""
+    api = flow.FlowAPI(browser_manager=None)
+    with pytest.raises(flow.GenerationError, match="FlowClient.generate_video"):
+        api.generate_video("golden lotus at dawn")
+    with pytest.raises(flow.GenerationError, match="FlowClient.generate_image"):
+        api.generate_image("golden lotus")
+    with pytest.raises(flow.GenerationError, match="FlowClient"):
+        api.extend_loop("media-1")
+    # Unknown names stay a plain AttributeError; read-only queries and downloads still work
+    assert not hasattr(api, "no_such_method")
+    assert callable(api.get_credits) and callable(api.download)
+
+
+# ── Root docs ────────────────────────────────────────────────────────────────
+
+
+def test_root_docs_only_reference_existing_markdown_files():
+    """Removing a root doc (e.g. a duplicate) must not leave dangling references behind."""
+    root = Path(__file__).resolve().parents[1]
+    docs = sorted(root.glob("*.md"))
+    assert {"PATCH.md", "PORTING-BRIEF.md"} <= {d.name for d in docs}  # docs are where we look
+    for doc in docs:
+        for ref in re.findall(r"\b[A-Z][A-Z0-9-]*\.md\b", doc.read_text(encoding="utf-8")):
+            assert (root / ref).is_file(), f"{doc.name} references missing {ref}"
 
 
 # ── CLI --help & offline validation ─────────────────────────────────────────

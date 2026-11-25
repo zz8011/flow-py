@@ -1,11 +1,12 @@
 """Offline unit tests for bilingual AgentUI selectors, price verification, and safety gates."""
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from flow._client import _make_cost_verifier, verify_upscale_menu_cost
+from flow._client import FlowClient, _make_cost_verifier, verify_upscale_menu_cost
 from flow._exceptions import GenerationError
 from flow._flow_ui import (
     _CARD_TEXT,
@@ -92,6 +93,38 @@ def test_has_nonzero_credit_quote_fail_closed():
     assert has_nonzero_credit_quote("1080p 消耗 点数") is True
 
 
+def test_parse_credit_cost_quotes_charge_not_balance():
+    """The quote is the points that will be charged; a balance figure is never the quote."""
+    assert parse_credit_cost("Balance: 0 credits. 50 credits will be charged") == 50
+    assert parse_credit_cost("Balance 24860 credits. Cost: 20 credits") == 20
+    # Balance only, no quote -> None; bare numbers still parse once the balance is dropped
+    assert parse_credit_cost("Balance: 24860 credits") is None
+    assert parse_credit_cost("Balance: 0 credits\n20 credits") == 20
+    assert has_nonzero_credit_quote("Balance: 0 credits. 50 credits will be charged") is True
+    # A 4K menu item that shows the balance is verified against the 50-credit quote
+    verify_upscale_menu_cost(
+        "4K Upscaled\nBalance 24860 credits. Cost: 50 credits", is_4k=True, official_4k_cost=50
+    )
+
+
+def test_has_nonzero_credit_quote_explicit_free():
+    for free in (
+        "1080p Upscaled — no credits charged",
+        "1080p Upscaled — no credits will be charged",
+        "1080p 免费高清重塑",
+        "1080p 高清重塑（免费，不消耗点数）",
+        "1080p Upscaled (Free)",
+    ):
+        assert has_nonzero_credit_quote(free) is False, free
+    # A free word never overrides an explicit positive quote (fail-closed)
+    assert has_nonzero_credit_quote("1080p Upscaled (Free) — 20 credits") is True
+
+
+def test_parse_duration_s_two_digit_short_form():
+    assert parse_duration_s("90s synthwave video") == 90
+    assert parse_duration_s("15s clip") == 15
+
+
 def test_bilingual_cost_verifier_and_upscale_gate():
     cfg = {
         "videoModels": [
@@ -123,6 +156,59 @@ def test_bilingual_cost_verifier_and_upscale_gate():
         verify_upscale_menu_cost("4K Upscaled (99 credits)", is_4k=True, official_4k_cost=50)
     with pytest.raises(GenerationError):
         verify_upscale_menu_cost("4K Upscaled", is_4k=True, official_4k_cost=50)
+
+
+# ── generate_video prompt assembly (aspect directive / Omni routing) ────────
+
+
+def _client_capturing_turns(monkeypatch) -> tuple[FlowClient, AsyncMock]:
+    """Offline FlowClient: every agent turn is captured instead of submitted."""
+    rpc = SimpleNamespace(
+        get_model_config=AsyncMock(return_value={}),
+        list_project_media=AsyncMock(return_value={"medias": []}),
+        get_media_url=AsyncMock(return_value="https://lh3.googleusercontent.com/x"),
+    )
+    bm = SimpleNamespace(page=AsyncMock(return_value=object()))
+    client = FlowClient(SimpleNamespace(_rpc_client=lambda: rpc), bm, "proj-1")
+    monkeypatch.setattr(
+        client,
+        "_wait_new_media",
+        AsyncMock(return_value={"media_id": "media-1", "workflow_id": ""}),
+    )
+    run_turn = AsyncMock()
+    monkeypatch.setattr(
+        "flow._client.AgentUI",
+        lambda bm, project_id: SimpleNamespace(open_session=AsyncMock(), run_turn=run_turn),
+    )
+    return client, run_turn
+
+
+@pytest.mark.asyncio
+async def test_generate_video_aspect_word_in_prompt_keeps_explicit_aspect(monkeypatch):
+    client, run_turn = _client_capturing_turns(monkeypatch)
+
+    await client.generate_video("A sweeping mountain landscape at dawn", aspect="portrait")
+    sent = run_turn.await_args.args[1]
+    assert "9:16 竖屏" in sent and "16:9" not in sent
+
+    # And the other way round: "portrait" in the prompt must not eat an explicit landscape
+    await client.generate_video("portrait painting of a merchant", aspect="landscape")
+    assert "16:9 横屏" in run_turn.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_generate_video_decimal_seconds_do_not_route_to_omni(monkeypatch):
+    client, run_turn = _client_capturing_turns(monkeypatch)
+
+    for prompt in ("0.3s fade-in from black, city skyline", "0.3秒 淡入，城市天际线"):
+        await client.generate_video(prompt)
+        sent = run_turn.await_args.args[1]
+        assert "Veo 3.1 - Fast" in sent and "Omni" not in sent, prompt
+
+    # An integral 3s (either unit) still routes to Omni 1.2 Flash
+    for prompt in ("city skyline in 3s", "城市天际线，3 秒"):
+        await client.generate_video(prompt)
+        assert "Omni 1.2 Flash" in run_turn.await_args.args[1], prompt
 
 
 # ── JS probes & AgentUI gating ──────────────────────────────────────────────

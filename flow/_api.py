@@ -266,12 +266,40 @@ class Workflow:
 
 # ── Core API client ──────────────────────────────────────────────────────────
 
+# v0.1.0 FlowAPI direct-generation/editing methods -> their FlowClient replacement. The
+# labs.google direct API they called is retired, so the names only survive to guide old code.
+_RETIRED_API_METHODS: dict[str, str] = {
+    "generate_image":            "FlowClient.generate_image()",
+    "generate_video":            "FlowClient.generate_video()",
+    "generate_video_from_image": "FlowClient.generate_video(start_image=...)",
+    "generate_video_multi_ref":  "FlowClient.generate_video(reference_images=[...])",
+    "extend_video":              "FlowClient.extend_video()",
+    "reshoot_video":             "FlowClient.camera_motion() / FlowClient.camera_position()",
+    "insert_object":             "FlowClient.insert_object()",
+    "remove_object":             "FlowClient.remove_object()",
+    "upscale_video":             "FlowClient.upscale_video()",
+    "extend_loop":               "FlowClient.extend_loop()",
+    "generate_video_and_wait":   "FlowClient.generate_video_and_wait()",
+    "upscale_and_wait":          "FlowClient.upscale_video()",
+    "extend_and_wait":           "FlowClient.extend_video() + FlowClient.wait_for_video()",
+    "reshoot_and_wait":          "FlowClient.camera_motion()/camera_position() + wait_for_video()",
+    "insert_and_wait":           "FlowClient.insert_object() + FlowClient.wait_for_video()",
+    "remove_and_wait":           "FlowClient.remove_object() + FlowClient.wait_for_video()",
+    "upload_image":              "FlowClient.generate_video(start_image=<local path>)",
+    "batch_generate_images":     "FlowClient.generate_image(count=...)",
+    "batch_generate_videos":     "a loop over FlowClient.generate_video()",
+    "rename_workflow":           "the flow.google.com web UI (no RPC for it; not ported)",
+}
+
+
 class FlowAPI:
     """
     Read-only RPC & media download client for Google Flow AI (flow.google.com).
 
     Backed by ``flow._rpc.FlowRPC`` (batchexecute with browser session cookies).
-    For video/image generation and editing, use ``FlowClient``.
+    For video/image generation and editing, use ``FlowClient`` — it drives the
+    in-page creation agent (the "agent UI path"). The retired v0.1.0 direct-API
+    method names are kept as stubs that raise ``GenerationError`` saying so.
     """
 
     def __init__(
@@ -291,6 +319,20 @@ class FlowAPI:
         self._project_page_url = (
             f"{FLOW_BASE}/project/{project_id}" if project_id else ""
         )
+
+    def __getattr__(self, name: str):
+        """Turn retired v0.1.0 direct-generation calls into a pointer at FlowClient."""
+        target = _RETIRED_API_METHODS.get(name)
+        if target is None:
+            raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
+
+        def _retired(*_args, **_kwargs):
+            raise GenerationError(
+                f"FlowAPI.{name}() is unavailable on flow.google.com (the labs.google "
+                f"direct API was retired); use {target} instead."
+            )
+
+        return _retired
 
     def _rpc_client(self):
         """Lazily build the batchexecute RPC client (flow.google.com)."""

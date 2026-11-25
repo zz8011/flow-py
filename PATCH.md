@@ -22,7 +22,7 @@
 ## 补丁内容
 
 - **新增 `flow/_rpc.py`**：batchexecute 传输层（WIZ 引导、wrb.fr 解析）+ 类型化方法 get_credits / list_projects / create_project / get_model_config（按账号 tier 解码官方价）/ list_project_media（结构化解析，视频靠 model_key + 时长标记判型）/ get_media_url（as29s 现签）。
-- **`flow/_api.py`**：get_credits、get_video_model_config、get_project_data / list_workflows、poll_video 改走 RPC（保持原签名与 Credits / Workflow / VideoStatus 返回形状，wait_for_video 等上层逻辑零改动）；直连生成方法（_video_call 扼流点 + generate_image）改为明确抛错指向 FlowClient；get_flow_app_config / get_user_settings 无对应 RPC，返回空。
+- **`flow/_api.py`**：get_credits、get_video_model_config、get_project_data / list_workflows、poll_video 改走 RPC（保持原签名与 Credits / Workflow / VideoStatus 返回形状，wait_for_video 等上层逻辑零改动）；直连生成方法（generate_image、generate_video、extend_video 等 v0.1.0 方法名）改为明确抛错指向 FlowClient 对应方法（`_RETIRED_API_METHODS` + `FlowAPI.__getattr__` 引导桩）；get_flow_app_config / get_user_settings 无对应 RPC，返回空。
 - **`flow/_browser.py`**：基址改 flow.google.com，项目 URL 正则与 CDP 页偏好同步。
 - **`flow/_flow_ui.py` 新增 `AgentUI`**：驱动创作智能体面板——开面板 / 新会话（edit_square）→ ProseMirror 输入（focus 兜底）→ arrow_forward 真实点击提交 → 失败回合点一次「重试」→ 等确认卡 → 解析卡上点数 / 时长 → 交调用方核价 → **真实输入点击**「批准」。
 - **`flow/_client.py`**：项目 URL 改新格式；generate_video / generate_image 换成 agent 会话流（提交与完成融合：批准后轮询 RPC 媒体列表等新媒体出现，返回的 VideoJob 已 COMPLETE 且带签名 URL）；编辑类操作（extend / camera / insert / remove / upscale）显式抛「未移植」错，不再静默失败。
@@ -41,7 +41,7 @@
 - 图片：`flow image "清晨的海边灯塔，电影感"` → agent 按其设置出 2 张并下载，积分不变（0 扣）。
 - 手动试生成的第一条（gen9，修补前）成品在 `trial-beach.mp4`。
 
-## 已知限制 / 二期移植进展（2026-11-18 更新，详见 `PORT2.md`）
+## 已知限制 / 二期移植进展（2026-11-18 更新，详见 `PORTING-RESULTS.md`）
 
 - **已全部移植并实测跑通**：
   - `generate_video(..., start_image=..., reference_images=...)`（`flow video --start` / `flow frames`）：支持挂载项目内已有图片 UUID 或直接上传本地图片作为首帧/多参考图生成视频。
