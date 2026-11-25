@@ -126,22 +126,32 @@ def has_nonzero_credit_quote(text: str) -> bool:
     cost = parse_credit_cost(text)
     if cost is not None:
         return cost > 0
-    if re.search(r"no credits? (?:will be )?charged|免费|\bfree\b", text, re.I):
-        return False  # an explicit free phrase is not an "unparseable quote"
-    return "消耗" in text or bool(re.search(r"\bcredits?\b", text, re.I))
+    # Bare 免费 / free never clears a charge word ("Try free! Additional credits apply" must
+    # abort); only an explicit negation does, so any charge word left outside one fails closed.
+    rest = re.sub(
+        r"no\s+credits?\s+(?:will\s+be\s+)?charged|(?:不|无需|不会|不必)消耗\s*(?:点数|积分)",
+        " ",
+        text,
+        flags=re.I,
+    )
+    return "消耗" in rest or bool(re.search(r"\bcredits?\b", rest, re.I))
 
 
 def parse_duration_s(text: str) -> Optional[int]:
-    """Extract a video duration in seconds from Chinese or English text."""
+    """Extract a video duration in seconds from Chinese or English text.
+
+    A decimal second ("0.5s fade-out", "10.5 秒") is a timing cue, not a duration: it
+    returns None so callers fall back to their default instead of the fractional digits.
+    """
     if not text:
         return None
-    m = re.search(r"(\d+)\s*秒", text)
+    m = re.search(r"(?<![\d.])(\d+)\s*秒", text)
     if m:
         return int(m.group(1))
-    m = re.search(r"(?<!\d)(\d+)\s*-?\s*(?:seconds?|secs?)\b", text, re.I)
+    m = re.search(r"(?<![\d.])(\d+)\s*-?\s*(?:seconds?|secs?)\b", text, re.I)
     if m:
         return int(m.group(1))
-    m = re.search(r"(?<!\d)(\d{1,2})s\b", text, re.I)
+    m = re.search(r"(?<![\d.])(\d{1,2})s\b", text, re.I)
     if m:
         return int(m.group(1))
     return None

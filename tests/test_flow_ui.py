@@ -111,8 +111,11 @@ def test_has_nonzero_credit_quote_explicit_free():
     for free in (
         "1080p Upscaled — no credits charged",
         "1080p Upscaled — no credits will be charged",
+        "1080p Upscaled — No Credits Will Be Charged",
         "1080p 免费高清重塑",
         "1080p 高清重塑（免费，不消耗点数）",
+        "1080p 高清重塑（免费，不会消耗点数）",
+        "1080p 高清重塑（无需消耗积分）",
         "1080p Upscaled (Free)",
     ):
         assert has_nonzero_credit_quote(free) is False, free
@@ -120,9 +123,45 @@ def test_has_nonzero_credit_quote_explicit_free():
     assert has_nonzero_credit_quote("1080p Upscaled (Free) — 20 credits") is True
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Round-3 review bypass samples: no quoted number, a free word, and a charge word
+        "Hands-free mode — credits required",
+        "Try free! Additional credits apply",
+        "1080p 免费试用（超出消耗点数）",
+        # The same shape in both languages
+        "1080p Upscaled (Free trial) — credits apply",
+        "1080p Upscaled — FREE preview, credits used for the final render",
+        "1080p Upscaled 免费 — credits apply",
+        "1080p 免费版（消耗积分）",
+        "1080p 高清重塑（免费试用，消耗点数）",
+        # A negation clears only the charge word inside it
+        "1080p Upscaled — no credits charged for 1080p; credits apply to 4K",
+        "1080p 高清重塑（不消耗点数）；4K 需消耗点数",
+    ],
+)
+def test_has_nonzero_credit_quote_free_word_does_not_clear_charge_word(text):
+    """免费 / free beside a charge word is an unparseable quote: the 1080p gate must abort."""
+    assert has_nonzero_credit_quote(text) is True
+    with pytest.raises(GenerationError, match="unexpectedly quotes"):
+        verify_upscale_menu_cost(text, is_4k=False)
+
+
 def test_parse_duration_s_two_digit_short_form():
     assert parse_duration_s("90s synthwave video") == 90
     assert parse_duration_s("15s clip") == 15
+    # Integral seconds keep parsing, with or without a space and next to CJK text
+    assert parse_duration_s("城市天际线，3 秒") == 3
+    assert parse_duration_s("生成3秒视频") == 3
+
+
+@pytest.mark.parametrize(
+    "text", ["0.3s", "0.13秒", "3.5s", "10.5 秒", "2.5 seconds", "0.5s fade-out"]
+)
+def test_parse_duration_s_fractional_seconds_fail_closed(text):
+    """A decimal second is a timing cue ("0.5s fade-out"), never a video duration."""
+    assert parse_duration_s(text) is None
 
 
 def test_bilingual_cost_verifier_and_upscale_gate():
@@ -161,11 +200,11 @@ def test_bilingual_cost_verifier_and_upscale_gate():
 # ── generate_video prompt assembly (aspect directive / Omni routing) ────────
 
 
-def _client_capturing_turns(monkeypatch) -> tuple[FlowClient, AsyncMock]:
+def _client_capturing_turns(monkeypatch, *, medias=(), cfg=None) -> tuple[FlowClient, AsyncMock]:
     """Offline FlowClient: every agent turn is captured instead of submitted."""
     rpc = SimpleNamespace(
-        get_model_config=AsyncMock(return_value={}),
-        list_project_media=AsyncMock(return_value={"medias": []}),
+        get_model_config=AsyncMock(return_value=cfg or {}),
+        list_project_media=AsyncMock(return_value={"medias": list(medias)}),
         get_media_url=AsyncMock(return_value="https://lh3.googleusercontent.com/x"),
     )
     bm = SimpleNamespace(page=AsyncMock(return_value=object()))
@@ -178,9 +217,22 @@ def _client_capturing_turns(monkeypatch) -> tuple[FlowClient, AsyncMock]:
     run_turn = AsyncMock()
     monkeypatch.setattr(
         "flow._client.AgentUI",
-        lambda bm, project_id: SimpleNamespace(open_session=AsyncMock(), run_turn=run_turn),
+        lambda bm, project_id: SimpleNamespace(
+            open_session=AsyncMock(),
+            attach_media=AsyncMock(),
+            attach_or_upload=AsyncMock(),
+            run_turn=run_turn,
+        ),
     )
     return client, run_turn
+
+
+_OMNI_PRICES = {
+    "videoModels": [
+        {"displayName": "Omni 1.2 Flash", "durationS": 3, "creditCost": 3},
+        {"displayName": "Omni 1.2 Flash", "durationS": 10, "creditCost": 30},
+    ]
+}
 
 
 @pytest.mark.asyncio
@@ -209,6 +261,44 @@ async def test_generate_video_decimal_seconds_do_not_route_to_omni(monkeypatch):
     for prompt in ("city skyline in 3s", "城市天际线，3 秒"):
         await client.generate_video(prompt)
         assert "Omni 1.2 Flash" in run_turn.await_args.args[1], prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prompt", ["0.13秒", "13秒", "23 秒", "13s clip", "23 seconds"])
+async def test_generate_video_only_exactly_three_seconds_routes_to_omni(monkeypatch, prompt):
+    """Neither branch may read the trailing 3 of a longer or fractional number as 3s."""
+    client, run_turn = _client_capturing_turns(monkeypatch)
+    await client.generate_video(prompt)
+    sent = run_turn.await_args.args[1]
+    assert "Omni" not in sent and "Veo 3.1 - Fast" in sent
+
+
+@pytest.mark.asyncio
+async def test_generate_video_fractional_seconds_keep_default_duration_clause(monkeypatch):
+    client, run_turn = _client_capturing_turns(monkeypatch)
+
+    # Default I2V (Omni): "0.3s fade-in" is a cue, so the 3s directive must still be written
+    await client.generate_video("0.3s fade-in from black, city skyline", start_image="media-img")
+    sent = run_turn.await_args.args[1]
+    assert "Omni 1.2 Flash" in sent and "时长 3 秒" in sent
+
+    # Veo 3.1 - Lite likewise pins its 4s default when the prompt carries "10.5 秒"
+    await client.generate_video("10.5 秒 的长镜头", model="Veo 3.1 - Lite")
+    assert "时长 4 秒" in run_turn.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_extend_video_fractional_seconds_fall_back_to_default_3s(monkeypatch):
+    """A "0.5s fade-out" cue used to parse as 5s, so the turn was requested at the 5s tier."""
+    client, run_turn = _client_capturing_turns(
+        monkeypatch, medias=({"media_id": "media-src", "workflow_id": ""},), cfg=_OMNI_PRICES
+    )
+    await client.extend_video("media-src", prompt="0.5s fade-out")
+    args, kwargs = run_turn.await_args
+    assert "延长 3 秒" in args[1] and "5 秒" not in args[1]
+    # A card that states no duration is pinned to the 3s tier
+    assert kwargs["verify_cost"]({"cost": 3, "duration_s": None}) is True
+    assert kwargs["verify_cost"]({"cost": 30, "duration_s": None}) is False
 
 
 # ── JS probes & AgentUI gating ──────────────────────────────────────────────

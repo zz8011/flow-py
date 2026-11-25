@@ -315,10 +315,10 @@ class FlowClient:
             (model or "").strip().lower(), (model or "Veo 3.1 - Fast").strip()
         )
         # Omni-only parameters (360p / 3s) or default I2V use Omni 1.2 Flash. The lookbehinds keep
-        # fractional seconds ("0.3s fade-in", "0.3秒") from reading as a 3s request.
+        # anything but an exact 3s ("0.3s fade-in", "0.13秒", "13秒") from reading as a 3s request.
         if (
             re.search(
-                r"360p|(?<!\.)3\s*秒|(?<![\d.])3\s*(?:s|sec|secs|seconds?)\b", prompt or "", re.I
+                r"360p|(?<![\d.])3\s*秒|(?<![\d.])3\s*(?:s|sec|secs|seconds?)\b", prompt or "", re.I
             )
             or (start_image and model_display == "Veo 3.1 - Fast" and "veo" not in (prompt or "").lower())
         ):
