@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "flow-py"
 version = "0.1.0"
-description = "Unofficial Python CLI & API for Google Flow AI (labs.google/fx) — bulk image/video generation automation"
+description = "Unofficial Python CLI & SDK for Google Flow AI (flow.google.com) & Flow Music (flowmusic.app / Lyria 3.5) — video, image & music generation automation"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-keywords = ["google-flow", "ai", "video-generation", "image-generation", "automation", "veo", "imagen"]
+keywords = ["google-flow", "flow-music", "ai", "video-generation", "image-generation", "music-generation", "automation", "veo", "omni", "imagen", "nano-banana", "lyria"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -46,3 +46,9 @@ include = ["flow*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"

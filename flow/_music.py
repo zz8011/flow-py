@@ -121,8 +121,10 @@ async def _probe_duration(path: str | Path) -> float:
     out, err = await proc.communicate()
     try:
         return float(out.decode().strip())
-    except ValueError:
-        raise FlowError(f"ffprobe could not read the video duration: {err.decode()[:200]}")
+    except ValueError as exc:
+        raise FlowError(
+            f"ffprobe could not read the video duration: {err.decode()[:200]}"
+        ) from exc
 
 
 def _extract_clip_ids_from_returns(tool_returns: list[dict[str, Any]]) -> list[str]:

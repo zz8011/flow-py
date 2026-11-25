@@ -7,12 +7,19 @@ dist/
 build/
 .eggs/
 *.pyo
+.ruff_cache/
+.mypy_cache/
 
 # Virtual environments
 .venv/
+.venv*
 venv/
 env/
 .env
+
+# Local scratch / temporary files
+.scratch/
+.scratch
 
 # Pytest / coverage
 .pytest_cache/

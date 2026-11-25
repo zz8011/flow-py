@@ -50,26 +50,28 @@ fi
 # ── pip install ───────────────────────────────────────────
 if [[ $DEV_MODE -eq 1 ]]; then
     echo "Installing in dev/editable mode …"
-    $PIP install -e "$SCRIPT_DIR[dev]" --quiet
+    "$PIP" install -e "$SCRIPT_DIR[dev]" --quiet
 else
-    $PIP install "$SCRIPT_DIR" --quiet
+    "$PIP" install "$SCRIPT_DIR" --quiet
 fi
 
 # ── Playwright browsers ───────────────────────────────────
 echo "Installing Playwright Chromium …"
-$PYTHON -m playwright install chromium --with-deps 2>/dev/null || \
-    $PYTHON -m playwright install chromium
+"$PYTHON" -m playwright install chromium --with-deps 2>/dev/null || \
+    "$PYTHON" -m playwright install chromium
 
 # ── Done ─────────────────────────────────────────────────
 echo ""
 echo "✅ flow-py installed!"
 echo ""
 echo "Next steps:"
-echo "  flow login                          # Authenticate with Google (one-time)"
-echo "  flow generate image 'your prompt'   # Generate an image"
-echo "  flow generate video 'your prompt'   # Generate a video"
-echo "  flow batch prompts.txt              # Process a batch file"
-echo "  flow --help                         # Full command reference"
+echo "  flow login                                 # Authenticate with Google (one-time)"
+echo "  flow status                                # Check session, project & credits"
+echo "  flow image 'your prompt'                   # Generate image(s)"
+echo "  flow video 'your prompt'                   # Generate a video"
+echo "  flow music status                          # Check Flow Music credits & songs"
+echo "  flow music generate 'your style' -f wav    # Generate music with Lyria 3.5"
+echo "  flow --help                                # Full command reference"
 echo ""
 if [[ $USE_VENV -eq 1 ]]; then
     echo "Note: venv wrapper installed at $BIN_DIR/flow"
