@@ -127,14 +127,17 @@ def has_nonzero_credit_quote(text: str) -> bool:
     if cost is not None:
         return cost > 0
     # Bare 免费 / free never clears a charge word ("Try free! Additional credits apply" must
-    # abort); only an explicit negation does, so any charge word left outside one fails closed.
+    # abort). Only an explicit negation, or an explicit zero quote, clears the points it
+    # mentions, so a charge word left outside one — 消耗 / credits / 点数 / 积分 — fails closed.
     rest = re.sub(
-        r"no\s+credits?\s+(?:will\s+be\s+)?charged|(?:不|无需|不会|不必)消耗\s*(?:点数|积分)",
+        r"no\s+credits?\s+(?:will\s+be\s+)?charged"
+        r"|(?:不|无需|无须|不用|不会|不必)(?:消耗|扣除?|使用|花(?:费)?)?\s*(?:点数|积分)"
+        r"|(?<![\d.])0\s*个?\s*(?:点数|积分)",
         " ",
         text,
         flags=re.I,
     )
-    return "消耗" in rest or bool(re.search(r"\bcredits?\b", rest, re.I))
+    return bool(re.search(r"消耗|点数|积分|\bcredits?\b", rest, re.I))
 
 
 def parse_duration_s(text: str) -> Optional[int]:

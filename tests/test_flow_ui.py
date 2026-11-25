@@ -116,6 +116,16 @@ def test_has_nonzero_credit_quote_explicit_free():
         "1080p 高清重塑（免费，不消耗点数）",
         "1080p 高清重塑（免费，不会消耗点数）",
         "1080p 高清重塑（无需消耗积分）",
+        # 点数 / 积分 are charge words too, so their negated and zero forms must stay free
+        "1080p 高清重塑（免费，不消耗积分）",
+        "1080p 高清重塑（免费，无需点数）",
+        "1080p 高清重塑（免费，不扣积分）",
+        "1080p 高清重塑（消耗 0 个点数）",
+        "1080p 高清重塑（0 点数）",
+        "1080p Upscaled (0 credits)",
+        # "credits" keeps its word boundary: accredited / discredits are not a charge
+        "1080p Upscaled (accredited partner)",
+        "1080p Upscaled (discredits ads)",
         "1080p Upscaled (Free)",
     ):
         assert has_nonzero_credit_quote(free) is False, free
@@ -126,10 +136,13 @@ def test_has_nonzero_credit_quote_explicit_free():
 @pytest.mark.parametrize(
     "text",
     [
-        # Round-3 review bypass samples: no quoted number, a free word, and a charge word
+        # The review report's five bypass samples, verbatim: no quoted number, a free
+        # word, and a charge word
         "Hands-free mode — credits required",
+        "Error-free 4K upscale — costs credits",
         "Try free! Additional credits apply",
         "1080p 免费试用（超出消耗点数）",
+        "1080p Upscaled — credits will be charged (free trial)",
         # The same shape in both languages
         "1080p Upscaled (Free trial) — credits apply",
         "1080p Upscaled — FREE preview, credits used for the final render",
@@ -143,6 +156,29 @@ def test_has_nonzero_credit_quote_explicit_free():
 )
 def test_has_nonzero_credit_quote_free_word_does_not_clear_charge_word(text):
     """免费 / free beside a charge word is an unparseable quote: the 1080p gate must abort."""
+    assert has_nonzero_credit_quote(text) is True
+    with pytest.raises(GenerationError, match="unexpectedly quotes"):
+        verify_upscale_menu_cost(text, is_4k=False)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "1080p 高清重塑（20 点数）",
+        "1080p 高清重塑（20 积分）",
+        "1080p 免费试用（超出 20 点数）",
+        "1080p 高清重塑（点数）",
+        "1080p 高清重塑（消耗 20）",
+        "1080p 高清重塑（10.0 点数）",
+        "1080p Upscaled — 积分 20",
+        # English quotes keep failing closed the same way
+        "1080p Upscaled (20 credits)",
+        "1080p Upscaled (uses credits)",
+        "1080p Upscaled — credit required",
+    ],
+)
+def test_has_nonzero_credit_quote_bare_points_quote_fails_closed(text):
+    """A quote written in 点数 / 积分 without 消耗 is a charge too: the 1080p gate must abort."""
     assert has_nonzero_credit_quote(text) is True
     with pytest.raises(GenerationError, match="unexpectedly quotes"):
         verify_upscale_menu_cost(text, is_4k=False)
